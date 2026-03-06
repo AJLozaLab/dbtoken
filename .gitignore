@@ -1,0 +1,6 @@
+*.md
+*.csv
+*.pyc
+rustbpe-master/
+__pycache__/
+*.zip
