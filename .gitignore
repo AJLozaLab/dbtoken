@@ -1,4 +1,5 @@
-*.md
+instruct.md
+instruct2.md
 *.csv
 *.pyc
 rustbpe-master/
