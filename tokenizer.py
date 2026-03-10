@@ -1386,6 +1386,297 @@ class DBTokenizer:
     def decode(self, ids: List[int]) -> List[str]:
         return [self.decode_token(i) for i in ids]
 
+    def decode_to_dataframe(
+        self,
+        ids: List[int],
+        vals: Optional[List[float]] = None,
+        reference_time: Optional[datetime] = None,
+        start_patient_id: int = 0,
+    ) -> "pl.DataFrame":
+        """
+        Invert a token-ID stream back into a Polars DataFrame.
+
+        The output schema mirrors the encoder input:
+        ``id``, ``time``, ``class``, ``text_value``, ``numeric_value``.
+
+        Parameters
+        ----------
+        ids : list[int]
+            Token ID sequence produced by :meth:`encode`.
+        vals : list[float] | None
+            Parallel float array from :meth:`encode` (required for
+            ``num_type='continuous'``; may be omitted for ``'discrete'``).
+        reference_time : datetime, optional
+            Absolute base timestamp for the first event of each patient.
+            Defaults to ``datetime(1970, 1, 1)``.  Because the encoder
+            stores only *relative* deltas, absolute timestamps are not
+            recoverable without this anchor.
+        start_patient_id : int
+            Integer ID assigned to the first patient sequence.
+            Subsequent patients increment by 1.
+
+        Returns
+        -------
+        pl.DataFrame
+            Reconstructed frame sorted by ``(id, time)``.
+
+        Notes
+        -----
+        * Birth-date rows used as ``<|sos|>`` triggers are not emitted.
+        * Age and milestone tokens carry no recoverable payload and are
+          silently dropped.
+        * Bin numeric values use edge midpoints (lowest/highest edge for
+          the outermost bins) — they are approximations of the originals.
+        * Level numeric values are recovered exactly via the stored
+          ``value_to_idx`` table.
+        * Continuous (scaling) values are approximately recovered via the
+          distribution-inverse transform; unscaling is only exact for
+          ``minmax`` distribution.
+        * BPE subword pieces are concatenated (no separator) to restore
+          ``text_value``.
+        * The ``inpatient`` column is not reconstructed.
+        """
+        import re as _re
+        import math as _math
+        from datetime import timedelta as _td
+
+        if reference_time is None:
+            reference_time = datetime(1970, 1, 1)
+
+        # ── Pre-build token-classification helpers ────────────────────
+        _HARD_SPECIALS = {
+            "<|sos|>", "<|eos|>", "<|pad|>",
+            "<|NUM|>", "<|ROW|>",
+            "<|delta_time_ip|>", "<|delta_time_op|>",
+        }
+        # Patterns for structured special tokens
+        _re_q       = _re.compile(r"^<\|Q(\d+)\|>$")
+        _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
+        _re_age     = _re.compile(r"^<\|age_\d+\|>$")
+        _re_ms      = _re.compile(r"^<\|ms_")
+        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+
+        # Class tokens: <|...|> tokens that are NOT any of the above
+        _all_special_re = _re.compile(
+            r"^<\|(?:sos|eos|pad|NUM|ROW|"
+            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
+        )
+        _class_token_set = {
+            tok for tok in self.vocab
+            if tok.startswith("<|") and tok.endswith("|>")
+            and not _all_special_re.match(tok)
+        }
+
+        def _bin_midpoint(edges: list, bin_idx: int) -> float:
+            """Midpoint of bin *bin_idx* given quantile *edges*.
+
+            ``np.digitize(x, edges, right=False)`` produces:
+              bin 0      → x < edges[0]         → return edges[0]
+              bin k      → edges[k-1] <= x < edges[k]  → midpoint
+              bin N      → x >= edges[-1]        → return edges[-1]
+            """
+            n = len(edges)
+            if n == 0:
+                return 0.0
+            if bin_idx <= 0:
+                return float(edges[0])
+            if bin_idx >= n:
+                return float(edges[-1])
+            return (float(edges[bin_idx - 1]) + float(edges[bin_idx])) / 2.0
+
+        # ── State ─────────────────────────────────────────────────────
+        rows: List[dict] = []
+        patient_id: int = start_patient_id - 1   # incremented on first <|sos|>
+        current_time: datetime = reference_time
+
+        # Per-row accumulators
+        pending_cls: Optional[str] = None
+        pending_tv_pieces: List[str] = []
+        pending_nv: Optional[float] = None        # fully resolved numeric
+        pending_scaled_val: Optional[float] = None  # fused-scaling raw val
+        pending_td_key: Optional[str] = None       # factored td: waiting for Q/NUM
+
+        def _flush() -> None:
+            nonlocal pending_cls, pending_tv_pieces, pending_nv, pending_scaled_val
+            if pending_cls is None:
+                return
+            tv_str: Optional[str] = "".join(pending_tv_pieces) or None
+            nv = pending_nv
+            # Fused-scaling: concept token carried the scaled val in vals[i]
+            if nv is None and pending_scaled_val is not None:
+                num_info = self.numeric_params.get((pending_cls, tv_str))
+                if num_info is not None and num_info.get("type") == "scaling":
+                    nv = self.unscale(num_info, pending_scaled_val)
+            rows.append({
+                "id":            patient_id,
+                "time":          current_time,
+                "class":         pending_cls,
+                "text_value":    tv_str,
+                "numeric_value": nv,
+            })
+            pending_cls = None
+            pending_tv_pieces = []
+            pending_nv = None
+            pending_scaled_val = None
+
+        # ── Main decode loop ──────────────────────────────────────────
+        for i, tok_id in enumerate(ids):
+            tok = self.decode_token(tok_id)
+            v_i = vals[i] if (vals is not None) else float("nan")
+
+            # ── Structural / bookkeeping ──────────────────────────────
+            if tok == "<|sos|>":
+                _flush()
+                patient_id += 1
+                current_time = reference_time
+                pending_td_key = None
+                continue
+
+            if tok in ("<|eos|>", "<|pad|>"):
+                _flush()
+                pending_td_key = None
+                continue
+
+            if tok == "<|ROW|>" or _re_age.match(tok) or _re_ms.match(tok):
+                continue   # informational only
+
+            # ── Fused time-delta (single combinatorial token) ─────────
+            m = _re_td_fuse.match(tok)
+            if m:
+                td_key = m.group(1)
+                bin_idx = int(m.group(2))
+                td_p = self.time_delta_params.get(td_key)
+                if td_p is not None:
+                    dt = _bin_midpoint(td_p["edges"], bin_idx)
+                    current_time = current_time + _td(seconds=dt)
+                continue
+
+            # ── Time-delta marker token ───────────────────────────────
+            m = _re_td_mrk.match(tok)
+            if m:
+                td_key = m.group(1)
+                td_p = self.time_delta_params.get(td_key)
+                if td_p is not None:
+                    if not _math.isnan(v_i):
+                        # Fused-continuous: val IS stored at this position
+                        dt = self.unscale(td_p, v_i)
+                        current_time = current_time + _td(seconds=max(dt, 0.0))
+                    else:
+                        # Factored mode: next Q/NUM belongs to this delta
+                        pending_td_key = td_key
+                continue
+
+            # ── Bin token ─────────────────────────────────────────────
+            m = _re_q.match(tok)
+            if m:
+                bin_idx = int(m.group(1))
+                if pending_td_key is not None:
+                    # Factored-discrete time delta
+                    td_p = self.time_delta_params.get(pending_td_key)
+                    if td_p is not None:
+                        dt = _bin_midpoint(td_p["edges"], bin_idx)
+                        current_time = current_time + _td(seconds=dt)
+                    pending_td_key = None
+                else:
+                    # Factored row-level bin numeric
+                    tv_str = "".join(pending_tv_pieces) or None
+                    num_info = self.numeric_params.get((pending_cls, tv_str))
+                    if num_info is not None and "edges" in num_info:
+                        pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
+                continue
+
+            # ── Level token ───────────────────────────────────────────
+            m = _re_l.match(tok)
+            if m:
+                level_idx = int(m.group(1))
+                tv_str = "".join(pending_tv_pieces) or None
+                num_info = self.numeric_params.get((pending_cls, tv_str))
+                if num_info is not None and "values" in num_info:
+                    lvls = num_info["values"]
+                    idx = max(0, min(level_idx, len(lvls) - 1))
+                    pending_nv = float(lvls[idx])
+                continue
+
+            # ── Continuous numeric token ──────────────────────────────
+            if tok == "<|NUM|>":
+                if pending_td_key is not None:
+                    # Factored-continuous time delta
+                    td_p = self.time_delta_params.get(pending_td_key)
+                    if td_p is not None and not _math.isnan(v_i):
+                        dt = self.unscale(td_p, v_i)
+                        current_time = current_time + _td(seconds=max(dt, 0.0))
+                    pending_td_key = None
+                else:
+                    # Factored-continuous row-level numeric
+                    tv_str = "".join(pending_tv_pieces) or None
+                    num_info = self.numeric_params.get((pending_cls, tv_str))
+                    if num_info is not None and not _math.isnan(v_i):
+                        pending_nv = self.unscale(num_info, v_i)
+                continue
+
+            # ── Class token ───────────────────────────────────────────
+            if tok in _class_token_set:
+                _flush()
+                # Extract class name from <|cls|>
+                pending_cls = tok[2:-2]
+                pending_tv_pieces = []
+                pending_nv = None
+                pending_scaled_val = None
+                pending_td_key = None
+                continue
+
+            # ── Fused concept+numeric token (tv::LN or tv::QN) ───────
+            if "::" in tok:
+                tv_part, qual = tok.rsplit("::", 1)
+                pending_tv_pieces = [tv_part]
+                if qual.startswith("L"):
+                    level_idx = int(qual[1:])
+                    num_info = self.numeric_params.get((pending_cls, tv_part))
+                    if num_info is not None and "values" in num_info:
+                        lvls = num_info["values"]
+                        idx = max(0, min(level_idx, len(lvls) - 1))
+                        pending_nv = float(lvls[idx])
+                elif qual.startswith("Q"):
+                    bin_idx = int(qual[1:])
+                    num_info = self.numeric_params.get((pending_cls, tv_part))
+                    if num_info is not None and "edges" in num_info:
+                        pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
+                continue
+
+            # ── Plain concept / BPE-subword text token ────────────────
+            # Fused-scaling path: val at this position is the scaled nv
+            if not _math.isnan(v_i):
+                pending_scaled_val = v_i
+            pending_tv_pieces.append(tok)
+
+        # Flush final patient
+        _flush()
+
+        # ── Build DataFrame ───────────────────────────────────────────
+        if not rows:
+            return pl.DataFrame(
+                schema={
+                    "id":            pl.Int64,
+                    "time":          pl.Datetime,
+                    "class":         pl.Utf8,
+                    "text_value":    pl.Utf8,
+                    "numeric_value": pl.Float64,
+                }
+            )
+
+        return pl.DataFrame(
+            rows,
+            schema={
+                "id":            pl.Int64,
+                "time":          pl.Datetime,
+                "class":         pl.Utf8,
+                "text_value":    pl.Utf8,
+                "numeric_value": pl.Float64,
+            },
+        ).sort(["id", "time"])
+
     # ──────────────────────────────────────────────────────────────────────
     # Save / Load
     # ──────────────────────────────────────────────────────────────────────
