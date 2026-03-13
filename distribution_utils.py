@@ -1,8 +1,28 @@
 import polars as pl
 import numpy as np
 import math
-from typing import Literal, Dict, List
+from typing import Dict, List
 from scipy import stats
+
+_PARAM_FUNCS = {
+    "normal": lambda vals: {"mean": np.mean(vals), "var": np.var(vals)},
+    "lognormal": lambda vals: {
+        "mu": np.mean(np.log(vals[vals > 0])) if (vals > 0).any() else 0,
+        "sigma2": np.var(np.log(vals[vals > 0])) if (vals > 0).any() else 1
+    },
+    "gamma": lambda vals: {
+        "alpha": (np.mean(vals) ** 2) / np.var(vals) if np.var(vals) > 0 else 1,
+        "beta": np.var(vals) / np.mean(vals) if np.mean(vals) > 0 else 1
+    },
+    "minmax": lambda vals: {"min": np.min(vals), "max": np.max(vals)}
+}
+
+_SCALING_FUNCS = {
+    "normal": lambda p, x: (x - p["mean"]) / math.sqrt(max(p["var"], 1e-8)),
+    "lognormal": lambda p, x: (math.log(x) - p["mu"]) / math.sqrt(max(p["sigma2"], 1e-8)) if x > 0 else None,
+    "gamma": lambda p, x: (x - p["alpha"] * p["beta"]) / math.sqrt(max(p["alpha"] * p["beta"]**2, 1e-8)),
+    "minmax": lambda p, x: (x - p["min"]) / max(p["max"] - p["min"], 1e-8)
+}
 
 def analyze_distributions(
     df: pl.DataFrame,
@@ -42,30 +62,6 @@ def analyze_distributions(
     # Get theoretical z-scores for standard normal at each percentile
     theoretical_z = {p: stats.norm.ppf(p/100) for p in percentiles}
     
-    # Helper functions for scaling
-    def get_param_funcs():
-        return {
-            "normal": lambda vals: {"mean": np.mean(vals), "var": np.var(vals)},
-            "lognormal": lambda vals: {
-                "mu": np.mean(np.log(vals[vals > 0])) if (vals > 0).any() else 0,
-                "sigma2": np.var(np.log(vals[vals > 0])) if (vals > 0).any() else 1
-            },
-            "gamma": lambda vals: {
-                "alpha": (np.mean(vals) ** 2) / np.var(vals) if np.var(vals) > 0 else 1,
-                "beta": np.var(vals) / np.mean(vals) if np.mean(vals) > 0 else 1
-            },
-            "minmax": lambda vals: {"min": np.min(vals), "max": np.max(vals)}
-        }
-    
-    def get_scaling_funcs():
-        eps = 1e-8
-        return {
-            "normal": lambda p, x: (x - p["mean"]) / math.sqrt(max(p["var"], eps)),
-            "lognormal": lambda p, x: (math.log(x) - p["mu"]) / math.sqrt(max(p["sigma2"], eps)) if x > 0 else None,
-            "gamma": lambda p, x: (x - p["alpha"] * p["beta"]) / math.sqrt(max(p["alpha"] * p["beta"]**2, eps)),
-            "minmax": lambda p, x: (x - p["min"]) / max(p["max"] - p["min"], eps)
-        }
-    
     def calculate_normalization_score(scaled_values, percentiles_list):
         """
         Calculate how well the scaled values match standard normal z-scores.
@@ -82,9 +78,6 @@ def analyze_distributions(
             return float('inf')
         
         return math.sqrt(np.mean(errors))
-    
-    param_funcs = get_param_funcs()
-    scaling_funcs = get_scaling_funcs()
     
     # Winsorize within groups
     p_min = clip_min / 100.0
@@ -128,13 +121,10 @@ def analyze_distributions(
     )
     
     
-    # Fit distributions for each group
-    results = []
-    
+    # Partition data by group once to avoid re-filtering per group
+    group_arrays = {}
     for row in group_stats.iter_rows(named=True):
         code = row[group_col]
-        
-        # Get values for this group
         values = (
             df_clean
             .filter(pl.col(group_col) == code)
@@ -142,19 +132,27 @@ def analyze_distributions(
             .to_series()
             .to_numpy()
         )
+        group_arrays[code] = values
+    
+    # Fit distributions for each group
+    results = []
+    
+    for row in group_stats.iter_rows(named=True):
+        code = row[group_col]
+        values = group_arrays[code]
         
         has_negatives = (values < 0).any()
         range_val = row['max_val'] - row['min_val']
         
         # Calculate parameters for each distribution
         params = {}
-        for dist_name, param_func in param_funcs.items():
+        for dist_name, param_func in _PARAM_FUNCS.items():
             try:
                 if dist_name in ["lognormal", "gamma"] and (has_negatives or not (values > 0).all()):
                     params[dist_name] = None
                 else:
                     params[dist_name] = param_func(values)
-            except:
+            except (ValueError, ZeroDivisionError, FloatingPointError):
                 params[dist_name] = None
         
         # Get percentile values
@@ -166,7 +164,7 @@ def analyze_distributions(
         
         for dist_name in ["normal", "lognormal", "gamma", "minmax"]:
             if params[dist_name] is not None:
-                scale_func = scaling_funcs[dist_name]
+                scale_func = _SCALING_FUNCS[dist_name]
                 scaled_values = []
                 
                 for p in percentiles:
@@ -175,7 +173,7 @@ def analyze_distributions(
                         scaled = scale_func(params[dist_name], val)
                         transformed[dist_name][f"p{p}_scaled"] = round(scaled, 3) if scaled is not None else None
                         scaled_values.append(scaled)
-                    except:
+                    except (ValueError, ZeroDivisionError, FloatingPointError):
                         transformed[dist_name][f"p{p}_scaled"] = None
                         scaled_values.append(None)
                 
@@ -190,6 +188,7 @@ def analyze_distributions(
         # Filter out invalid scores
         valid_scores = {k: v for k, v in norm_scores.items() if v != float('inf')}
         
+        is_clustered_high = False
         if not valid_scores:
             best_dist = 'normal'  # Fallback
         else:
@@ -245,29 +244,3 @@ def analyze_distributions(
         results.append(result)
     
     return pl.DataFrame(results).sort("count", descending=True)
-
-
-def get_distribution_summary(analysis_df: pl.DataFrame) -> Dict:
-    """Get summary statistics from distribution analysis."""
-    total = len(analysis_df)
-    
-    dist_counts = (
-        analysis_df
-        .group_by("recommendation")
-        .agg(pl.count().alias("count"))
-        .sort("count", descending=True)
-    )
-    
-    return {
-        "total_groups": total,
-        "distribution_counts": dist_counts.to_dicts(),
-        "percent_negative": (analysis_df["has_negatives"].sum() / total * 100),
-        "median_skewness": analysis_df["skewness"].median(),
-        "avg_best_norm_score": analysis_df.select([
-            pl.when(pl.col("recommendation") == "normal").then(pl.col("normal_norm_score"))
-            .when(pl.col("recommendation") == "lognormal").then(pl.col("lognormal_norm_score"))
-            .when(pl.col("recommendation") == "gamma").then(pl.col("gamma_norm_score"))
-            .when(pl.col("recommendation") == "minmax").then(pl.col("minmax_norm_score"))
-            .alias("best_score")
-        ]).get_column("best_score").mean(),
-    }

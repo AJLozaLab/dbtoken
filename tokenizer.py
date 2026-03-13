@@ -27,7 +27,7 @@ import json
 import warnings
 from typing import Optional, Dict, List, Tuple, Any, Union
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # BPE: rustbpe (training) + tiktoken (inference)
@@ -62,56 +62,54 @@ _MAX_DAY_OF_WEEK = 7
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _scaling_formulas():
-    """Scale / unscale lambdas for supported distributions."""
-    eps = 1e-8
-    return {
-        "normal": {
-            "scale": lambda p, x: (x - p["mean"]) / math.sqrt(max(p["var"], eps)),
-            "unscale": lambda p, x: x * math.sqrt(max(p["var"], eps)) + p["mean"],
-        },
-        "lognormal": {
-            "scale": lambda p, x: (
-                (math.log(max(x, eps)) - p["mu"])
-                / math.sqrt(max(p["sigma2"], eps))
-            ),
-            "unscale": lambda p, x: math.exp(
-                x * math.sqrt(max(p["sigma2"], eps)) + p["mu"]
-            ),
-        },
-        "gamma": {
-            "scale": lambda p, x: (
-                (x - p["alpha"] * p["beta"])
-                / math.sqrt(max(p["alpha"] * p["beta"] ** 2, eps))
-            ),
-            "unscale": lambda p, x: (
-                x * math.sqrt(max(p["alpha"] * p["beta"] ** 2, eps))
-                + p["alpha"] * p["beta"]
-            ),
-        },
-        "minmax": {
-            "scale": lambda p, x: (x - p["min"]) / max(p["max"] - p["min"], eps),
-            "unscale": lambda p, x: x * max(p["max"] - p["min"], eps) + p["min"],
-        },
-    }
+_SCALING_FORMULAS = {
+    "normal": {
+        "scale": lambda p, x: (x - p["mean"]) / math.sqrt(max(p["var"], 1e-8)),
+        "unscale": lambda p, x: x * math.sqrt(max(p["var"], 1e-8)) + p["mean"],
+    },
+    "lognormal": {
+        "scale": lambda p, x: (
+            (math.log(max(x, 1e-8)) - p["mu"])
+            / math.sqrt(max(p["sigma2"], 1e-8))
+        ),
+        "unscale": lambda p, x: math.exp(
+            x * math.sqrt(max(p["sigma2"], 1e-8)) + p["mu"]
+        ),
+    },
+    "gamma": {
+        "scale": lambda p, x: (
+            (x - p["alpha"] * p["beta"])
+            / math.sqrt(max(p["alpha"] * p["beta"] ** 2, 1e-8))
+        ),
+        "unscale": lambda p, x: (
+            x * math.sqrt(max(p["alpha"] * p["beta"] ** 2, 1e-8))
+            + p["alpha"] * p["beta"]
+        ),
+    },
+    "minmax": {
+        "scale": lambda p, x: (x - p["min"]) / max(p["max"] - p["min"], 1e-8),
+        "unscale": lambda p, x: x * max(p["max"] - p["min"], 1e-8) + p["min"],
+    },
+}
+
+
+_FIT_PARAM_FUNCS = {
+    "normal": lambda v: {"mean": float(np.mean(v)), "var": float(np.var(v))},
+    "lognormal": lambda v: {
+        "mu": float(np.mean(np.log(v[v > 0]))) if (v > 0).any() else 0.0,
+        "sigma2": float(np.var(np.log(v[v > 0]))) if (v > 0).any() else 1.0,
+    },
+    "gamma": lambda v: {
+        "alpha": float(np.mean(v) ** 2 / max(np.var(v), 1e-8)),
+        "beta": float(np.var(v) / max(np.mean(v), 1e-8)),
+    },
+    "minmax": lambda v: {"min": float(np.min(v)), "max": float(np.max(v))},
+}
 
 
 def _fit_params(distribution: str, vals: np.ndarray) -> dict:
     """Compute moment-matched distribution parameters from a numpy array."""
-    eps = 1e-8
-    funcs = {
-        "normal": lambda v: {"mean": float(np.mean(v)), "var": float(np.var(v))},
-        "lognormal": lambda v: {
-            "mu": float(np.mean(np.log(v[v > 0]))) if (v > 0).any() else 0.0,
-            "sigma2": float(np.var(np.log(v[v > 0]))) if (v > 0).any() else 1.0,
-        },
-        "gamma": lambda v: {
-            "alpha": float(np.mean(v) ** 2 / max(np.var(v), eps)),
-            "beta": float(np.var(v) / max(np.mean(v), eps)),
-        },
-        "minmax": lambda v: {"min": float(np.min(v)), "max": float(np.max(v))},
-    }
-    return funcs[distribution](vals)
+    return _FIT_PARAM_FUNCS[distribution](vals)
 
 
 def _milestone_marker(kind: str, ts: datetime, shift_start: int) -> Optional[str]:
@@ -206,8 +204,6 @@ class DBTokenizer:
             r"""|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
             r"""|\s+(?!\S)|\s+"""
         ),
-        bpe_training_sample: Optional[Union[int, float]] = None,
-        bpe_training_seed: int = 42,
         # --- clinical state ---
         admission_classes: Optional[List[str]] = None,
         discharge_classes: Optional[List[str]] = None,
@@ -249,8 +245,6 @@ class DBTokenizer:
         self.distributions = distributions
         self.final_vocab_size = final_vocab_size
         self.split_pattern = split_pattern
-        self.bpe_training_sample = bpe_training_sample
-        self.bpe_training_seed = bpe_training_seed
         self.admission_classes: List[str] = admission_classes or []
         self.discharge_classes: List[str] = discharge_classes or []
         self.milestone_ip = milestone_ip
@@ -750,19 +744,6 @@ class DBTokenizer:
                 if self._get_text_mode(r["class"], r["text_value"]) == "bpe":
                     bpe_text_list.append(r["text_value"])
 
-            if self.bpe_training_sample is not None and \
-               len(bpe_text_list) > 0:
-                sample_n = len(bpe_text_list)
-                if isinstance(self.bpe_training_sample, float):
-                    sample_n = int(len(bpe_text_list) * self.bpe_training_sample)
-                elif isinstance(self.bpe_training_sample, int):
-                    sample_n = min(self.bpe_training_sample, len(bpe_text_list))
-                rng = np.random.default_rng(self.bpe_training_seed)
-                indices = rng.choice(
-                    len(bpe_text_list), size=sample_n, replace=False
-                )
-                bpe_text_list = [bpe_text_list[i] for i in indices]
-
             # --- Train BPE merges with rustbpe ---
             n_special = len(all_special)
             bpe_vocab_size = max(self.final_vocab_size - n_special, 256)
@@ -859,10 +840,6 @@ class DBTokenizer:
                     ids.append(self.vocab["<|eos|>"])
                     if vals is not None:
                         vals.append(float("nan"))
-                elif last_id is None:
-                    pass  # first patient, no EOS needed
-                elif row["id"] == last_id:
-                    pass  # same patient birth row (shouldn't duplicate but be safe)
 
                 last_id = row["id"]
                 last_time = None   # explicitly no delta from birth row
@@ -874,13 +851,7 @@ class DBTokenizer:
                 ids.append(self.vocab["<|sos|>"])
                 if vals is not None:
                     vals.append(float("nan"))
-                # Emit initial age milestone
-                age = self._compute_age(row["id"], ts)
-                if age is not None and 0 <= age <= _MAX_AGE:
-                    ids.append(self.vocab[f"<|age_{age}|>"])
-                    if vals is not None:
-                        vals.append(float("nan"))
-                    last_age = age
+                # Age will be emitted at the first real event via Kalman check
                 continue
 
             # ── New patient (no birth-date row) → <|eos|> + <|sos|> ───
@@ -1126,25 +1097,14 @@ class DBTokenizer:
             c, t = r
             text_modes_list.append(self._get_text_mode(c, t))
 
+        is_bpe = pl.Series("_is_bpe", [1 if m == "bpe" else 0 for m in text_modes_list])
+        bpe_cum = is_bpe.cum_sum()
         df = df.with_columns(
-            pl.Series("_text_mode", text_modes_list)
-        )
-        df = df.with_columns(
-            pl.when(pl.col("_text_mode") == "bpe")
-            .then(1)
-            .otherwise(0)
-            .alias("_is_bpe")
-        )
-        df = df.with_columns(
-            pl.col("_is_bpe").cum_sum().alias("_bpe_cum")
-        )
-        df = df.with_columns(
-            pl.when(pl.col("_is_bpe") == 1)
-            .then(pl.col("_bpe_cum") - 1)
+            pl.when(is_bpe == 1)
+            .then(bpe_cum - 1)
             .otherwise(-1)
             .alias("_bpe_cache_idx")
         )
-        df = df.drop(["_is_bpe", "_bpe_cum", "_text_mode"])
 
         return df
 
@@ -1171,29 +1131,13 @@ class DBTokenizer:
         hi = params.get("max_threshold")
         if lo is not None and hi is not None:
             x = max(lo, min(x, hi))
-        f = _scaling_formulas().get(params.get("distribution"))
+        f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["scale"](params, x) if f else x
 
     @staticmethod
     def unscale(params: dict, x_scaled: float) -> float:
-        f = _scaling_formulas().get(params.get("distribution"))
+        f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["unscale"](params, x_scaled) if f else x_scaled
-
-    def scale_by_key(
-        self, key: Tuple[str, Optional[str]], x: float,
-    ) -> float:
-        p = self.numeric_params.get(key)
-        if p is None or p["type"] != "scaling":
-            return x
-        return self.scale(p, x)
-
-    def unscale_by_key(
-        self, key: Tuple[str, Optional[str]], x_scaled: float,
-    ) -> float:
-        p = self.numeric_params.get(key)
-        if p is None or p["type"] != "scaling":
-            return x_scaled
-        return self.unscale(p, x_scaled)
 
     def _scale_td(self, dt: float, params: dict) -> float:
         return self.scale(params, dt)
@@ -1241,10 +1185,7 @@ class DBTokenizer:
                 last_age = None
                 last_ms_ip = None
                 last_ms_op = None
-                age = self._compute_age(row["id"], ts)
-                if age is not None and 0 <= age <= _MAX_AGE:
-                    rt.append(f"<|age_{age}|>")
-                    last_age = age
+                # Age will be emitted at the first real event via Kalman check
                 tokens_col.append(rt)
                 continue
 
