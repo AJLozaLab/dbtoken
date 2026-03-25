@@ -69,8 +69,8 @@ By default, `text_mode_default="auto"` selects BPE for classes with more than
 ```python
 tok = DBTokenizer(
     text_mode_overrides={
-        "medications": "bpe",                         # class-level
-        ("notes", "discharge_summary"): "concept",    # pair-level
+        "admission": "bpe",               # class-level. force BPE for class "admission" even if it had low cardinality
+        ("notes", "N/A"): "concept",      # pair-level. force concept token for "N/A" in "notes" class, even if "notes" overall uses BPE    
     },
 )
 ```
@@ -99,8 +99,8 @@ and the scaled float is stored in the parallel `vals` array.
 
 | Mode | Token Stream Example |
 |---|---|
-| **Factored** | `<|lab|>`, `hemoglobin`, `<|L4|>` |
-| **Fused** | `<|lab|>`, `hemoglobin::L4` |
+| **Factored** | `<\|lab\|>`, `hemoglobin`, `<\|L4\|>` |
+| **Fused** | `<\|lab\|>`, `hemoglobin::L4` |
 
 Fused mode merges the text token and its numeric level/bin into a single
 compound token (using `::` as delimiter). This reduces sequence length but
