@@ -43,7 +43,7 @@ Four tokenizer fixtures are trained on these datasets:
 
 ---
 
-## Test 1 — Cross-Scheme Comparability (the "money shot")
+## Test 1 — Cross-Scheme Comparability 
 
 **Class:** `TestCrossSchemeComparability`
 
