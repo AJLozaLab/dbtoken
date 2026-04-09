@@ -1143,6 +1143,179 @@ class DBTokenizer:
         return self.scale(params, dt)
 
     # ──────────────────────────────────────────────────────────────────────
+    # Token classification (for metrics)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _build_token_type_lookup(self) -> Dict[int, str]:
+        """Build a {token_id: type_str} lookup for all known tokens.
+
+        Type strings:
+            'sos', 'eos', 'pad', 'num_marker', 'row',
+            'time_delta', 'time_delta_fused',
+            'milestone', 'age',
+            'class',
+            'concept', 'bpe',
+            'Q', 'L',
+            'fused_concept_Q', 'fused_concept_L'
+        """
+        import re as _re
+
+        _re_q       = _re.compile(r"^<\|Q(\d+)\|>$")
+        _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
+        _re_age     = _re.compile(r"^<\|age_\d+\|>$")
+        _re_ms      = _re.compile(r"^<\|ms_")
+        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        _all_special_re = _re.compile(
+            r"^<\|(?:sos|eos|pad|NUM|ROW|"
+            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
+        )
+
+        lookup: Dict[int, str] = {}
+
+        # Classify everything in self.vocab (special + concept tokens)
+        for tok_str, tok_id in self.vocab.items():
+            if tok_str == "<|sos|>":
+                lookup[tok_id] = "sos"
+            elif tok_str == "<|eos|>":
+                lookup[tok_id] = "eos"
+            elif tok_str == "<|pad|>":
+                lookup[tok_id] = "pad"
+            elif tok_str == "<|NUM|>":
+                lookup[tok_id] = "num_marker"
+            elif tok_str == "<|ROW|>":
+                lookup[tok_id] = "row"
+            elif _re_td_fuse.match(tok_str):
+                lookup[tok_id] = "time_delta_fused"
+            elif _re_td_mrk.match(tok_str):
+                lookup[tok_id] = "time_delta"
+            elif _re_q.match(tok_str):
+                lookup[tok_id] = "Q"
+            elif _re_l.match(tok_str):
+                lookup[tok_id] = "L"
+            elif _re_age.match(tok_str):
+                lookup[tok_id] = "age"
+            elif _re_ms.match(tok_str):
+                lookup[tok_id] = "milestone"
+            elif "::" in tok_str:
+                if "::L" in tok_str:
+                    lookup[tok_id] = "fused_concept_L"
+                elif "::Q" in tok_str:
+                    lookup[tok_id] = "fused_concept_Q"
+                else:
+                    lookup[tok_id] = "concept"
+            elif (tok_str.startswith("<|") and tok_str.endswith("|>")
+                  and not _all_special_re.match(tok_str)):
+                lookup[tok_id] = "class"
+            else:
+                # Plain concept token (no <|...|> wrapper)
+                if not tok_str.startswith("<|"):
+                    lookup[tok_id] = "concept"
+
+        return lookup
+
+    def classify_token_ids(self, ids: List[int]) -> List[str]:
+        """Classify each token ID into a type string.
+
+        Returns a list parallel to *ids* with one of:
+            'sos', 'eos', 'pad', 'num_marker', 'row',
+            'time_delta', 'time_delta_fused',
+            'milestone', 'age', 'class',
+            'concept', 'bpe',
+            'Q', 'L',
+            'fused_concept_Q', 'fused_concept_L'
+        """
+        if not hasattr(self, "_token_type_lookup"):
+            self._token_type_lookup = self._build_token_type_lookup()
+        lut = self._token_type_lookup
+        return [lut.get(tid, "bpe") for tid in ids]
+
+    def get_numeric_context(
+        self, ids: List[int],
+    ) -> List[Optional[dict]]:
+        """Walk a token sequence and return the numeric params dict for each
+        position where a density adjustment is needed.
+
+        For time-delta positions returns ``time_delta_params["ip"|"op"]``.
+        For row-level Q / L / NUM / fused_concept_Q / fused_concept_L
+        returns the appropriate ``numeric_params[(cls, tv)]`` dict.
+        All other positions return ``None``.
+
+        Must be called **after** :meth:`classify_token_ids`.
+        """
+        import re as _re
+        if not hasattr(self, "_token_type_lookup"):
+            self._token_type_lookup = self._build_token_type_lookup()
+
+        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+
+        types = self.classify_token_ids(ids)
+        out: List[Optional[dict]] = [None] * len(ids)
+
+        current_cls: Optional[str] = None
+        current_tv: Optional[str] = None
+        pending_td_key: Optional[str] = None  # "ip" or "op"
+
+        for i, (tid, ttype) in enumerate(zip(ids, types)):
+            tok = self.decode_token(tid)
+
+            # Track class context
+            if ttype == "class":
+                current_cls = tok[2:-2]  # strip <| and |>
+                current_tv = None
+                pending_td_key = None
+                continue
+
+            # Track text context
+            if ttype == "concept":
+                current_tv = tok
+                continue
+
+            # Time-delta fused: params come from time_delta_params
+            if ttype == "time_delta_fused":
+                m = _re_td_fuse.match(tok)
+                if m:
+                    td = self.time_delta_params.get(m.group(1))
+                    if td is not None:
+                        out[i] = {**td, "_is_time_delta": True}
+                continue
+
+            # Time-delta marker: note the key for the next Q/NUM
+            if ttype == "time_delta":
+                m = _re_td_mrk.match(tok)
+                if m:
+                    pending_td_key = m.group(1)
+                continue
+
+            # Q or NUM following a time-delta marker
+            if ttype in ("Q", "num_marker") and pending_td_key is not None:
+                td = self.time_delta_params.get(pending_td_key)
+                if td is not None:
+                    out[i] = {**td, "_is_time_delta": True}
+                pending_td_key = None
+                continue
+
+            # Row-level Q, L, num_marker
+            if ttype in ("Q", "L", "num_marker"):
+                out[i] = self.numeric_params.get((current_cls, current_tv))
+                continue
+
+            # Fused concept tokens
+            if ttype in ("fused_concept_Q", "fused_concept_L"):
+                tv_part = tok.rsplit("::", 1)[0]
+                out[i] = self.numeric_params.get((current_cls, tv_part))
+                current_tv = tv_part
+                continue
+
+            # Reset pending_td on anything else
+            if ttype not in ("milestone", "age"):
+                pending_td_key = None
+
+        return out
+
+    # ──────────────────────────────────────────────────────────────────────
     # Debug encoding
     # ──────────────────────────────────────────────────────────────────────
 

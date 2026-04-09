@@ -27,7 +27,7 @@
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 50%; 
   background: #aaa; color: #fff; font-size: 10px; font-weight: bold; font-family: var(--font-mono, monospace);
-  transition: background 0.2s;
+  transition: background 0.2s, box-shadow 0.2s;
 }
 .row-badge.inj { background: #d0d0d0; color: #666; }
 
@@ -37,9 +37,15 @@
 .src-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono, monospace); font-size: 11px; }
 .src-table thead th { position: sticky; top: 0; background: #f0f0f0; z-index: 5; text-align: left; padding: 5px 10px; color: #555; border-bottom: 1px solid #ccc; font-weight: 600; }
 .src-table td { padding: 5px 10px; border-bottom: 1px solid #eee; transition: background 0.2s; }
-.src-table tr { transition: background-color 0.15s; }
+.src-table tr { transition: background-color 0.1s; }
+
+/* Playback Active Row */
 .src-table tr.active { background-color: #f0f4f8; }
 .src-table tr.active .row-badge { background: #185FA5; box-shadow: 0 0 0 2px rgba(24,95,165,0.2); }
+
+/* Hover Active Row (Overrides playback styling during hover) */
+.src-table tr.hover-active { background-color: #e2e8f0; }
+.src-table tr.hover-active .row-badge { background: #0C447C; box-shadow: 0 0 0 2px rgba(12,68,124,0.3); }
 
 /* -- Stage 2: Training Panels -- */
 .train-container { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; align-items: stretch; }
@@ -62,15 +68,18 @@
 .leg-item { display: flex; align-items: center; gap: 5px; color: #555; font-weight: 500;}
 .leg-box { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); }
 
-/* Token Inspector Logic Box - Updated for Left Justification */
+/* Token Inspector Logic Box - Now using CSS Grid for strict alignment */
 .inspector-box { 
-  display: flex; align-items: flex-start; gap: 14px; 
+  display: grid; 
+  grid-template-columns: 180px 1fr; 
+  align-items: center; gap: 16px; 
   background: #f0f4f8; border: 1px solid #dce4eb; border-radius: 6px; 
-  padding: 12px 14px; margin-bottom: 12px; min-height: 56px; 
+  padding: 10px 16px; margin-bottom: 12px; min-height: 58px; 
 }
-.inspector-placeholder { color: #888; font-style: italic; font-size: 12px; margin: auto 0; text-align: left; }
-.inspector-desc { font-size: 12px; color: #333; line-height: 1.5; flex: 1; text-align: left; }
-.inspector-desc b { color: #185FA5; }
+.inspector-placeholder { grid-column: 1 / -1; color: #888; font-style: italic; font-size: 12px; margin: 0; }
+.inspector-token-wrapper { display: flex; justify-content: flex-start; }
+.inspector-desc { font-size: 12px; color: #333; line-height: 1.4; margin: 0; padding-left: 16px; border-left: 2px solid #cbd5e1; }
+.inspector-desc b { color: #185FA5; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .inspector-tok-label { font-family: var(--font-mono, monospace); font-size: 11px; background: #e2e8f0; padding: 2px 5px; border-radius: 3px; color: #111; margin: 0 4px; font-weight: 600; border: 1px solid #cbd5e1; }
 
 .stream-wrap { 
@@ -136,6 +145,7 @@
       </div>
     </div>
 
+    <!-- 1. Source Data (Mini) -->
     <div class="sec-title">1. The Raw Schema</div>
     <div class="table-wrap">
       <table class="src-table">
@@ -150,10 +160,13 @@
       </table>
     </div>
 
+    <!-- 2. Training Artifacts -->
     <div class="sec-title">2. Training & Core Concepts</div>
     <div class="train-container" id="train-grid">
-      </div>
+      <!-- Injected via JS -->
+    </div>
 
+    <!-- 3. Token Stream & Full Data -->
     <div class="sec-title" style="justify-content: space-between; margin-bottom: 8px;">
       <span>3. Synchronized Encoding</span>
       <div class="stream-controls">
@@ -163,6 +176,7 @@
       </div>
     </div>
     
+    <!-- Full Scrollable Table -->
     <div class="table-wrap scrollable" id="full-table-wrap">
       <table class="src-table">
         <thead>
@@ -193,6 +207,7 @@
       </table>
     </div>
 
+    <!-- Token Color Guide -->
     <div class="stream-legend">
       <div class="leg-items">
         <span class="leg-item"><span class="leg-box t-struct"></span> Structural</span>
@@ -205,12 +220,15 @@
       </div>
     </div>
 
+    <!-- Token Inspector Box -->
     <div class="inspector-box" id="inspector-box">
-      <div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic.</div>
+      <div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>
     </div>
 
+    <!-- The Stream -->
     <div class="stream-wrap" id="sync-stream">
-      </div>
+      <!-- Token groups injected here -->
+    </div>
 
   </div>
 </div>
@@ -269,19 +287,20 @@ const TRAIN_DATA = {
 
 // Map tooltip/inspector data. Format: "TypeName:Description"
 const TT = {
-  sos: "Structural: Start of Sequence.",
-  eos: "Structural: End of Sequence.",
-  age: "State Tracker: Patient age derived from Row 0. Injected automatically.",
-  cls: "Class Token: Declares the schema category of the upcoming sequence.",
-  l_fuse: "Fused Concept (Level): Distinct values fall below threshold, mapping to exact discrete 'Levels'.",
-  c_fuse: "Fused Concept (Continuous): Text token natively carries the centered/scaled continuous float.",
-  q_fuse: "Fused Concept (Bin): Continuous values parameterized into discrete Quantile bins.",
-  dt_c: "Time Delta (Continuous): Gap between rows, expressed as a Gamma-scaled continuous float.",
-  dt_q: "Time Delta (Bin): Gap between rows, sorted into a discrete Quantile bin.",
-  ms: "State Tracker (Milestone): Indicates the time gap just crossed a logical grid boundary.",
-  bpe: "BPE Subword: High-cardinality text broken into smaller learned chunks.",
-  f_num: "Factored Numeric: BPE mode forces the payload into a separate, following numeric token.",
-  f_bin: "Factored Bin: BPE mode forces the quantile bin into a separate, following numeric token."
+  sos: "Structural:Start of Sequence.",
+  eos: "Structural:End of Sequence.",
+  age: "State Tracker:Patient age derived from Row 0. Injected automatically.",
+  cls: "Class Filter:Declares the schema category of the upcoming sequence.",
+  l_fuse: "Fused Concept (Level):Distinct values fall below threshold, mapping to exact discrete 'Levels'.",
+  c_fuse: "Fused Concept (Continuous):Text token natively carries the centered/scaled continuous float.",
+  q_fuse: "Fused Concept (Bin):Continuous values parameterized into discrete Quantile bins.",
+  dt_c: "Time Delta (Continuous):Gap between rows, expressed as a Gamma-scaled continuous float.",
+  dt_q: "Time Delta (Bin):Gap between rows, sorted into a discrete Quantile bin.",
+  ms: "State Tracker (Milestone):Indicates the time gap just crossed a logical grid boundary.",
+  bpe: "BPE Subword:High-cardinality text broken into smaller learned chunks.",
+  f_num: "Factored Numeric:BPE mode forces the payload into a separate, following numeric token.",
+  f_bin: "Factored Bin:BPE mode forces the quantile bin into a separate, following numeric token.",
+  c_none: "Concept Token:String token without any numeric payload."
 };
 
 const STREAM_SEQ = {
@@ -325,11 +344,11 @@ const STREAM_SEQ = {
     { r: 9, tok: "<|NUM|>", type: "t-num", val: 1.250, desc: TT.f_num },
     { r: 10, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
     { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
     { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
     { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
     { r: 13, tok: "<|delta_time_op|>", type: "t-time", val: 1.572, desc: TT.dt_c },
     { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
@@ -388,11 +407,11 @@ const STREAM_SEQ = {
     { r: 9, tok: "<|Q3|>", type: "t-num", val: null, desc: TT.f_bin },
     { r: 10, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
     { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
     { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
-    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: "Concept Token: String without numeric payload." },
+    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
     { r: 13, tok: "<|delta_time_op_Q5|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
@@ -513,29 +532,42 @@ function renderNextToken() {
   
   chip.innerHTML = innerHTML;
   
-  // Custom Inspector Logic
+  // Custom Inspector & Hover Highlight Logic
   chip.onmouseenter = () => {
+    // 1. Highlight Row
+    document.querySelectorAll('#sync-tbody tr').forEach(tr => tr.classList.remove('hover-active'));
+    if (data.r !== "end") {
+      const hoverRow = document.getElementById(`row-${data.r}`);
+      if (hoverRow) hoverRow.classList.add('hover-active');
+    }
+
+    // 2. Populate Inspector
     const clone = chip.cloneNode(true);
     clone.style.animation = 'none';
     clone.style.cursor = 'default';
     clone.style.transform = 'none';
-    clone.style.marginTop = '2px';
+    clone.style.margin = '0';
     
     const parts = data.desc.split(':');
     const typeName = parts[0];
-    const definition = parts.slice(1).join(':');
+    const definition = parts.slice(1).join(':').trim();
+    
+    const wrapper = document.createElement('div');
+    wrapper.className = 'inspector-token-wrapper';
+    wrapper.appendChild(clone);
     
     const descDiv = document.createElement('div');
     descDiv.className = 'inspector-desc';
-    descDiv.innerHTML = `<b>${typeName}</b> <span class="inspector-tok-label">${formatToken(data.tok)}</span> ${definition}`;
+    descDiv.innerHTML = `<b>${typeName}</b> <span class="inspector-tok-label">${formatToken(data.tok)}</span> &mdash; ${definition}`;
     
     inspectorBox.innerHTML = '';
-    inspectorBox.appendChild(clone);
+    inspectorBox.appendChild(wrapper);
     inspectorBox.appendChild(descDiv);
   };
   
   chip.onmouseleave = () => {
-    inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic.</div>';
+    document.querySelectorAll('#sync-tbody tr').forEach(tr => tr.classList.remove('hover-active'));
+    inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>';
   };
   
   currentGroup.appendChild(chip);
@@ -577,7 +609,7 @@ function resetStream() {
   lastRowId = null;
   currentGroup = null;
   streamEl.innerHTML = '';
-  inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic.</div>';
+  inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>';
   setActiveRow(null);
   tableWrap.scrollTop = 0;
 }
