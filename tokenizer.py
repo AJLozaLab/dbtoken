@@ -646,6 +646,7 @@ class DBTokenizer:
                 - pl.col("class").is_in(self.discharge_classes).cast(pl.Int8)
             )
             .cum_sum()
+            .shift(1, fill_value=0)
             .over("id")
             .clip(0, 1)
             .cast(pl.Boolean)
