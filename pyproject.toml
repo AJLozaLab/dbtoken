@@ -1,0 +1,31 @@
+[project]
+name = "dbtoken"
+version = "0.1.0"
+description = "A tokenizer for long-format database and EHR tabular data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "polars",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+bpe = ["tiktoken"]
+dev = [
+    "pytest>=8.0",
+    "tiktoken",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["tokenizer", "distribution_utils", "metrics"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+python_files = "test_*.py"

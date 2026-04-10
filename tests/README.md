@@ -43,11 +43,11 @@ Four tokenizer fixtures are trained on these datasets:
 
 ---
 
-## Test 1 — Cross-Scheme Comparability 
+## Test 1 — Discrete/Continuous Numeric Precision Comparability 
 
 **Class:** `TestCrossSchemeComparability`
 
-**What it proves:** If a discrete model and a continuous model are equally good at predicting a numeric value, they produce *identical* density-adjusted bits.
+If a discrete model and a continuous model are equally good at predicting a numeric value, they produce identical density-adjusted bits.
 
 **Setup:**
 1. Encode the same data with both `discrete_tok` (Q bins) and `continuous_tok` (Gaussian scaling).
@@ -55,7 +55,7 @@ Four tokenizer fixtures are trained on these datasets:
    - Discrete oracle: assigns probability 1.0 to the correct bin → raw bits = 0.
    - Continuous oracle: Gaussian with $\sigma_z$ chosen so the original-space density exactly equals $1/w_k$.
 
-**The math:**
+**Justification:**
 
 For the discrete oracle:
 $$-\log_2\!\left(\frac{p(Q_k)}{w_k}\right) = -\log_2\!\left(\frac{1}{w_k}\right) = \log_2(w_k)$$
@@ -65,7 +65,6 @@ $$-\log_2(p_x) = -\log_2(1/w_k) = \log_2(w_k)$$
 
 Both give $\log_2(w_k)$.  The test asserts this equality to $10^{-10}$ tolerance.
 
-**Why it matters:** This is the whole reason the metric exists.  If this test fails, the metric cannot be used to compare tokenization strategies.
 
 ---
 

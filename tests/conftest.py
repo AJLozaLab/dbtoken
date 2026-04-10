@@ -1,15 +1,8 @@
 """Shared fixtures and data builders for DBTokenizer tests."""
-import sys
-from pathlib import Path
-
 import polars as pl
 import numpy as np
 import pytest
 from datetime import datetime, timedelta
-
-# Ensure the project root and tests dir are importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tokenizer import DBTokenizer
 

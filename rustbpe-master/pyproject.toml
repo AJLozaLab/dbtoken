@@ -1,0 +1,43 @@
+[project]
+name = "rustbpe"
+version = "0.1.0"
+description = "A BPE (Byte Pair Encoding) tokenizer written in Rust with Python bindings"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Optional: runtime Python dependencies (if any)
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+
+# Tells Python to use maturin as the build backend
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+# Maturin-specific configuration
+[tool.maturin]
+# Build features - enables extension-module only for Python builds
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+python_files = "test_*.py"
+markers = [
+    "slow: marks tests as slow (use -m 'not slow' to skip)",
+]
