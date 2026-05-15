@@ -57,6 +57,15 @@ _MAX_SHIFT_12 = 2   # 0 or 1 (two 12-hr shifts per day)
 _MAX_SHIFT_8 = 3    # 0, 1, or 2 (three 8-hr shifts per day)
 _MAX_DAY_OF_WEEK = 7
 
+# All possible time-delta key names across all four modes.
+_ALL_TD_KEYS = (
+    "td",
+    "ip", "op",
+    "under_24", "over_24",
+    "ip_under_24", "ip_over_24",
+    "op_under_24", "op_over_24",
+)
+_TD_KEY_PATTERN = "|".join(_ALL_TD_KEYS)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -214,6 +223,9 @@ class DBTokenizer:
         # --- demographics ---
         birth_date_class: str = "demographic",
         birth_date_text_value: str = "birth_date",
+        # --- time-delta 24h split ---
+        time_split_24h: bool = False,
+        time_split_threshold: int = 86400,
     ):
         # Validate
         if text_mode_default not in ("auto", "bpe", "concept"):
@@ -252,6 +264,8 @@ class DBTokenizer:
         self.milestone_shift_start = milestone_shift_start
         self.birth_date_class = birth_date_class
         self.birth_date_text_value = birth_date_text_value
+        self.time_split_24h = time_split_24h
+        self.time_split_threshold = time_split_threshold
 
         # Learned state (populated by train)
         self.class_text_modes: Dict[str, str] = {}
@@ -266,7 +280,44 @@ class DBTokenizer:
         self._dist_recommendations: Dict[str, str] = {}
         self._trained: bool = False
         self._birth_dates: Dict = {}   # id → datetime, extracted from data
+    
+    # ─── Time-delta key helpers (2×2 matrix) ──────────────────────────────
 
+    @property
+    def _has_ip_op(self) -> bool:
+        return bool(self.admission_classes and self.discharge_classes)
+
+    @property
+    def _td_keys(self) -> Tuple[str, ...]:
+        """Return the time-delta param keys for the active mode."""
+        has_ip = self._has_ip_op
+        has_24 = self.time_split_24h
+        if has_ip and has_24:
+            return ("ip_under_24", "ip_over_24", "op_under_24", "op_over_24")
+        if has_ip:
+            return ("ip", "op")
+        if has_24:
+            return ("under_24", "over_24")
+        return ("td",)
+
+    def _resolve_td_key(self, dt: float, is_ip: bool) -> str:
+        """Pick the time-delta key for a given delta and inpatient flag."""
+        has_ip = self._has_ip_op
+        has_24 = self.time_split_24h
+
+        prefix = ("ip" if is_ip else "op") if has_ip else None
+        suffix = (
+            "under_24" if dt < self.time_split_threshold else "over_24"
+        ) if has_24 else None
+
+        if prefix and suffix:
+            return f"{prefix}_{suffix}"
+        if prefix:
+            return prefix
+        if suffix:
+            return suffix
+        return "td"
+      
     # ─── Schema validation ────────────────────────────────────────────────
 
     @staticmethod
@@ -553,7 +604,15 @@ class DBTokenizer:
     # ·····  time-delta training  ······································
 
     def _train_time_deltas(self, df: pl.DataFrame):
-        """Fit time-delta distributions/bins for IP and OP periods."""
+        """Fit time-delta distributions/bins.
+
+        Four modes (2×2 matrix of IP/OP × 24h-split):
+          * No IP/OP, no 24h  → single "td" key
+          * IP/OP only        → "ip", "op"
+          * 24h only          → "under_24", "over_24"
+          * Both              → "ip_under_24", "ip_over_24",
+                                 "op_under_24", "op_over_24"
+        """
         with_deltas = (
             df
             .sort(["id", "time"])
@@ -573,35 +632,60 @@ class DBTokenizer:
             )
             return
 
-        if self.admission_classes and self.discharge_classes:
+        has_ip = self._has_ip_op
+        has_24 = self.time_split_24h
+        threshold = float(self.time_split_threshold)
+
+        if has_ip:
             with_deltas = self._compute_admission_state(with_deltas)
+
+        def _fit_subset(series: pl.Series, key: str):
+            if series.len() > 0:
+                self.time_delta_params[key] = \
+                    self._fit_time_delta_series(series)
+
+        if has_ip and has_24:
+            ip_df = with_deltas.filter(pl.col("inpatient"))
+            op_df = with_deltas.filter(~pl.col("inpatient"))
+            for prefix, sub_df in [("ip", ip_df), ("op", op_df)]:
+                deltas = sub_df.select("time_delta_s").to_series()
+                under = deltas.filter(deltas < threshold)
+                over = deltas.filter(deltas >= threshold)
+                _fit_subset(under, f"{prefix}_under_24")
+                _fit_subset(over, f"{prefix}_over_24")
+
+        elif has_ip:
             ip = with_deltas.filter(
                 pl.col("inpatient")
             ).select("time_delta_s").to_series()
             op = with_deltas.filter(
                 ~pl.col("inpatient")
             ).select("time_delta_s").to_series()
+            _fit_subset(ip, "ip")
+            _fit_subset(op, "op")
 
-            if ip.len() > 0:
-                self.time_delta_params["ip"] = self._fit_time_delta_series(ip)
-            if op.len() > 0:
-                self.time_delta_params["op"] = self._fit_time_delta_series(op)
+        elif has_24:
+            all_deltas = with_deltas.select("time_delta_s").to_series()
+            under = all_deltas.filter(all_deltas < threshold)
+            over = all_deltas.filter(all_deltas >= threshold)
+            _fit_subset(under, "under_24")
+            _fit_subset(over, "over_24")
 
-            if "ip" not in self.time_delta_params or \
-               "op" not in self.time_delta_params:
-                global_p = self._fit_time_delta_series(
-                    with_deltas.select("time_delta_s").to_series()
-                )
-                self.time_delta_params.setdefault("ip", global_p)
-                self.time_delta_params.setdefault("op", global_p)
         else:
+            all_deltas = with_deltas.select("time_delta_s").to_series()
+            _fit_subset(all_deltas, "td")
+
+        # Fallback: if any expected key is missing, clone the global fit
+        expected_keys = self._td_keys
+        missing = [k for k in expected_keys if k not in self.time_delta_params]
+        if missing:
             global_p = self._fit_time_delta_series(
                 with_deltas.select("time_delta_s").to_series()
             )
-            self.time_delta_params["ip"] = global_p
-            self.time_delta_params["op"] = global_p
+            for k in missing:
+                self.time_delta_params[k] = global_p
 
-        for k in ("ip", "op"):
+        for k in expected_keys:
             p = self.time_delta_params.get(k, {})
             print(f"  {k.upper()} time-delta: {p.get('type', 'N/A')} "
                   f"({p.get('distribution', '-')})")
@@ -660,7 +744,9 @@ class DBTokenizer:
 
         # ── Standard special tokens ───────────────────────────────────
         special: List[str] = ["<|sos|>", "<|eos|>", "<|pad|>"]
-        special.extend(["<|delta_time_ip|>", "<|delta_time_op|>", "<|NUM|>"])
+        for k in _ALL_TD_KEYS:
+            special.append(f"<|delta_time_{k}|>")
+        special.append("<|NUM|>")
 
         for i in range(self.n_bins + 1):
             special.append(f"<|Q{i}|>")
@@ -692,10 +778,10 @@ class DBTokenizer:
 
         # ── Fused time-delta tokens (fused + discrete) ───────────────
         if self.num_seq == "fused" and self.num_type == "discrete":
-            for prefix in ("delta_time_ip", "delta_time_op"):
+            for k in _ALL_TD_KEYS:
                 for i in range(self.n_bins + 1):
-                    special.append(f"<|{prefix}_Q{i}|>")
-
+                    special.append(f"<|delta_time_{k}_Q{i}|>")
+                  
         # ── Concept text tokens ──────────────────────────────────────
         concept_tokens: List[str] = []
         concept_text_vals = set()
@@ -977,7 +1063,7 @@ class DBTokenizer:
         self, ids: list, vals: Optional[list], dt: float, is_ip: bool,
     ):
         """Emit time-delta token(s)."""
-        td_key = "ip" if is_ip else "op"
+        td_key = self._resolve_td_key(dt, is_ip)
         td_name = f"<|delta_time_{td_key}|>"
         td_p = self.time_delta_params.get(td_key)
         if td_p is None:
@@ -1086,7 +1172,7 @@ class DBTokenizer:
         df = df.sort(["id", "time"])
 
         # ── Admission state ──────────────────────────────────────────
-        if self.admission_classes and self.discharge_classes:
+        if self._has_ip_op:
             df = self._compute_admission_state(df)
         else:
             df = df.with_columns(pl.lit(False).alias("inpatient"))
@@ -1165,11 +1251,15 @@ class DBTokenizer:
         _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
         _re_age     = _re.compile(r"^<\|age_\d+\|>$")
         _re_ms      = _re.compile(r"^<\|ms_")
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        _re_td_fuse = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")_Q(\d+)\|>$"
+        )
+        _re_td_mrk  = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")\|>$"
+        )
         _all_special_re = _re.compile(
             r"^<\|(?:sos|eos|pad|NUM|ROW|"
-            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            r"delta_time_(?:" + _TD_KEY_PATTERN + r")(?:_Q\d+)?|"
             r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
         )
 
@@ -1249,8 +1339,12 @@ class DBTokenizer:
         if not hasattr(self, "_token_type_lookup"):
             self._token_type_lookup = self._build_token_type_lookup()
 
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        _re_td_fuse = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")_Q(\d+)\|>$"
+        )
+        _re_td_mrk  = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")\|>$"
+        )
 
         types = self.classify_token_ids(ids)
         out: List[Optional[dict]] = [None] * len(ids)
@@ -1382,7 +1476,7 @@ class DBTokenizer:
             if ts is not None and last_time is not None:
                 dt = (ts - last_time).total_seconds()
                 if dt > 0:
-                    td_key = "ip" if is_ip else "op"
+                    td_key = self._resolve_td_key(dt, is_ip)
                     td_p = self.time_delta_params.get(td_key)
                     if td_p is not None:
                         if self.num_seq == "fused" and self.num_type == "discrete":
@@ -1562,20 +1656,23 @@ class DBTokenizer:
         _HARD_SPECIALS = {
             "<|sos|>", "<|eos|>", "<|pad|>",
             "<|NUM|>", "<|ROW|>",
-            "<|delta_time_ip|>", "<|delta_time_op|>",
-        }
+        } | {f"<|delta_time_{k}|>" for k in _ALL_TD_KEYS}
         # Patterns for structured special tokens
         _re_q       = _re.compile(r"^<\|Q(\d+)\|>$")
         _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
         _re_age     = _re.compile(r"^<\|age_\d+\|>$")
         _re_ms      = _re.compile(r"^<\|ms_")
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        _re_td_fuse = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")_Q(\d+)\|>$"
+        )
+        _re_td_mrk  = _re.compile(
+            r"^<\|delta_time_(" + _TD_KEY_PATTERN + r")\|>$"
+        )
 
         # Class tokens: <|...|> tokens that are NOT any of the above
         _all_special_re = _re.compile(
             r"^<\|(?:sos|eos|pad|NUM|ROW|"
-            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            r"delta_time_(?:" + _TD_KEY_PATTERN + r")(?:_Q\d+)?|"
             r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
         )
         _class_token_set = {
@@ -1857,6 +1954,8 @@ class DBTokenizer:
             "milestone_shift_start": self.milestone_shift_start,
             "birth_date_class": self.birth_date_class,
             "birth_date_text_value": self.birth_date_text_value,
+            "time_split_24h": self.time_split_24h,
+            "time_split_threshold": self.time_split_threshold,
             "class_text_modes": self.class_text_modes,
             "pair_text_modes": ser_ptm,
             "numeric_params": ser_np,
@@ -1916,6 +2015,8 @@ class DBTokenizer:
             milestone_shift_start=cfg.get("milestone_shift_start", 7),
             birth_date_class=cfg.get("birth_date_class", "demographic"),
             birth_date_text_value=cfg.get("birth_date_text_value", "birth_date"),
+            time_split_24h=cfg.get("time_split_24h", False),
+            time_split_threshold=cfg.get("time_split_threshold", 86400),
         )
 
         tok.class_text_modes = cfg["class_text_modes"]
