@@ -641,16 +641,13 @@ class DBTokenizer:
         vals_clipped = np.clip(vals, lo, hi)
 
         if self.num_type == "continuous":
-            eps = 1e-8
-            mean_v = float(np.mean(vals_clipped))
-            var_v = float(np.var(vals_clipped))
+            params = _fit_params("lognormal", vals_clipped)
             return {
                 "type": "scaling",
-                "distribution": "gamma",
+                "distribution": "lognormal",
                 "min_threshold": lo,
                 "max_threshold": hi,
-                "alpha": mean_v ** 2 / max(var_v, eps),
-                "beta": var_v / max(mean_v, eps),
+                **params,
             }
         else:
             p_edges = list(
