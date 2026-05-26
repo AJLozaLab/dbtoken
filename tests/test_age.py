@@ -27,8 +27,7 @@ class TestAgeTokens:
             num_seq="factored",
             n_bins=5,
             level_threshold=10,
-            milestone_ip="daily",
-            milestone_op="week",
+            milestone_per_state={"default": "week"},
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -80,7 +79,6 @@ class TestAgeTokens:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="none",
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -134,7 +132,6 @@ class TestAgeTokens:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="none",
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -155,7 +152,6 @@ class TestAgeTokens:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="none",
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -176,7 +172,6 @@ class TestMultiPatientAge:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="none",
         )
         tok.train(df)
         dbg = tok.encode_debug(df)

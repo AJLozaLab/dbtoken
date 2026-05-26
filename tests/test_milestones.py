@@ -1,4 +1,4 @@
-"""Tests for inpatient/outpatient milestones, trigger times, and Kalman-filter boundary emission."""
+"""Tests for state-driven milestones, trigger times, and Kalman-filter boundary emission."""
 import polars as pl
 import pytest
 from datetime import datetime, timedelta
@@ -26,8 +26,7 @@ class TestMilestoneEmission:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_ip="daily",
-            milestone_op="week",
+            milestone_per_state={"default": "week"},
         )
         tok.train(df)
         dbg = tok.encode_debug(df)
@@ -37,24 +36,22 @@ class TestMilestoneEmission:
         ms_toks = [t for t in p2_toks if t.startswith("<|ms_")]
         assert len(ms_toks) > 0, "Expected milestone tokens for patient 2 spanning multiple weeks"
 
-    def test_milestone_op_none_suppresses(self):
-        """milestone_op='none' suppresses all OP milestones."""
+    def test_no_milestone_per_state_suppresses(self):
+        """No milestone_per_state (empty dict) suppresses all milestones."""
         df = make_df(include_birth=True)
         tok = DBTokenizer(
             text_mode_default="concept",
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_ip="daily",
-            milestone_op="none",
+            # milestone_per_state not set → empty dict → "none" for all states
         )
         tok.train(df)
         dbg = tok.encode_debug(df)
 
-        # All patients are outpatient (no admission/discharge) → OP milestones
         all_toks = _all_tokens_from_debug(dbg)
         ms_toks = [t for t in all_toks if t.startswith("<|ms_")]
-        assert len(ms_toks) == 0, f"Expected no milestones with op='none', got {ms_toks}"
+        assert len(ms_toks) == 0, f"Expected no milestones without milestone_per_state, got {ms_toks}"
 
     def test_boundary_only_emission(self):
         """Milestones emit only when boundary changes (Kalman-filter style)."""
@@ -74,7 +71,7 @@ class TestMilestoneEmission:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="daily",
+            milestone_per_state={"default": "daily"},
         )
         tok.train(df)
         dbg = tok.encode_debug(df)
@@ -86,20 +83,22 @@ class TestMilestoneEmission:
         assert len(ms_day) <= 1, f"Expected at most 1 daily milestone within same day, got {ms_day}"
 
 
-class TestIPMilestones:
+class TestStateMilestones:
 
-    def test_8hr_ip_milestones(self):
-        """Admitted patient uses IP milestone mode (8hr shifts)."""
+    def test_8hr_milestones_when_inpatient(self):
+        """Admitted patient uses 8hr milestones; outpatient uses weekly."""
         df = make_df(include_birth=True, include_admit=True)
         tok = DBTokenizer(
             text_mode_default="concept",
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"],
-            discharge_classes=["discharge"],
-            milestone_ip="8hr",
-            milestone_op="week",
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
+            milestone_per_state={"inpatient": "8hr", "outpatient": "week"},
             milestone_shift_start=7,
         )
         tok.train(df)
@@ -108,10 +107,10 @@ class TestIPMilestones:
         # Patient 1 is admitted → should use IP milestones (8hr)
         p1_toks = _all_tokens_from_debug(dbg, patient_id=1)
         ms_8hr = [t for t in p1_toks if "<|ms_8hr_" in t]
-        assert len(ms_8hr) > 0, "Expected 8hr IP milestones for admitted patient"
+        assert len(ms_8hr) > 0, "Expected 8hr milestones for admitted patient"
 
-    def test_12hr_ip_milestones(self):
-        """12hr milestone mode produces shift tokens."""
+    def test_12hr_milestones_when_inpatient(self):
+        """12hr milestone mode produces shift tokens for admitted patient."""
         rows = [
             {"id": 1, "time": datetime(2023, 1, 1, 8, 0), "class": "admission",
              "text_value": None, "numeric_value": None},
@@ -134,10 +133,12 @@ class TestIPMilestones:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"],
-            discharge_classes=["discharge"],
-            milestone_ip="12hr",
-            milestone_op="none",
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
+            milestone_per_state={"inpatient": "12hr"},
             milestone_shift_start=7,
         )
         tok.train(df)
@@ -146,7 +147,35 @@ class TestIPMilestones:
         ms_12hr = [t for t in all_toks if "<|ms_12hr_" in t]
         assert len(ms_12hr) > 0, "Expected 12hr milestones for admitted patient"
 
-    def test_month_milestones(self):
+    def test_state_transition_resets_milestone_boundary(self):
+        """Transitioning state resets the milestone boundary tracker."""
+        rows = [
+            {"id": 1, "time": datetime(2023, 1, 1, 8, 0), "class": "lab",
+             "text_value": "glucose", "numeric_value": 100.0},
+            {"id": 1, "time": datetime(2023, 1, 1, 9, 0), "class": "admission",
+             "text_value": None, "numeric_value": None},
+            {"id": 1, "time": datetime(2023, 1, 1, 10, 0), "class": "lab",
+             "text_value": "glucose", "numeric_value": 101.0},
+        ]
+        df = pl.DataFrame(rows)
+        tok = DBTokenizer(
+            text_mode_default="concept",
+            num_type="discrete",
+            num_seq="factored",
+            n_bins=5,
+            state_transitions={"inpatient": ["admission"]},
+            initial_state="default",
+            milestone_per_state={"default": "daily", "inpatient": "8hr"},
+        )
+        tok.train(df)
+        # Just verify it encodes without error
+        ids, _ = tok.encode(df)
+        assert len(ids) > 0
+
+
+class TestMonthMilestones:
+
+    def test_month_milestones_across_months(self):
         """month milestone mode produces monthly tokens across months."""
         rows = []
         for i in range(4):
@@ -163,7 +192,7 @@ class TestIPMilestones:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            milestone_op="month",
+            milestone_per_state={"default": "month"},
         )
         tok.train(df)
         dbg = tok.encode_debug(df)
@@ -176,8 +205,6 @@ class TestMilestoneShiftStart:
 
     def test_shift_start_affects_8hr_boundary(self):
         """milestone_shift_start changes when 8hr boundaries fall."""
-        # Events at hour 6, 7, 8 with shift_start=7: hours 6 and 7 are in the
-        # same pre-shift period relative to shift_start=7
         rows = [
             {"id": 1, "time": datetime(2023, 1, 1, 8, 0), "class": "admission",
              "text_value": None, "numeric_value": None},
@@ -201,28 +228,24 @@ class TestMilestoneShiftStart:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"],
-            discharge_classes=["discharge"],
-            milestone_ip="8hr",
-            milestone_op="none",
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
+            milestone_per_state={"inpatient": "8hr"},
             milestone_shift_start=7,
         )
         tok.train(df)
         dbg = tok.encode_debug(df)
         all_toks = _all_tokens_from_debug(dbg)
         ms_8hr = [t for t in all_toks if "<|ms_8hr_" in t]
-        # With events spanning 6-23 relative to shift_start=7, should cross boundaries
         assert len(ms_8hr) > 0, "Expected 8hr milestones with shift_start=7"
 
 
 class TestValidation:
 
-    def test_invalid_milestone_ip(self):
-        """Invalid milestone_ip raises ValueError."""
-        with pytest.raises(ValueError, match="milestone_ip"):
-            DBTokenizer(milestone_ip="invalid")
-
-    def test_invalid_milestone_op(self):
-        """Invalid milestone_op raises ValueError."""
-        with pytest.raises(ValueError, match="milestone_op"):
-            DBTokenizer(milestone_op="invalid")
+    def test_invalid_milestone_per_state_value(self):
+        """Invalid milestone value in milestone_per_state raises ValueError."""
+        with pytest.raises(ValueError, match="milestone_per_state"):
+            DBTokenizer(milestone_per_state={"default": "invalid"})

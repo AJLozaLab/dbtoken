@@ -48,8 +48,6 @@ class TestDistributionAutoDetect:
             num_type="continuous",
             num_seq="factored",
             level_threshold=3,  # force scaling (make_df has >3 distinct values)
-            milestone_op="none",
-            milestone_ip="none",
         )
         tok.train(df)
 
@@ -66,9 +64,7 @@ class TestDistributionAutoDetect:
         tok = DBTokenizer(
             text_mode_default="concept",
             num_type="continuous",
-            num_seq="factored",
-            milestone_op="none",
-            milestone_ip="none",
+            num_seq="factored"
         )
         tok.train(df)
 
@@ -87,9 +83,7 @@ class TestDistributionOverrides:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"lognormal": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"lognormal": ["lab"]}
         )
         tok.train(df)
 
@@ -103,9 +97,7 @@ class TestDistributionOverrides:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"gamma": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"gamma": ["lab"]}
         )
         tok.train(df)
 
@@ -119,9 +111,7 @@ class TestDistributionOverrides:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"minmax": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"minmax": ["lab"]}
         )
         tok.train(df)
 
@@ -138,9 +128,7 @@ class TestNegativeValueHandling:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"lognormal": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"lognormal": ["lab"]}
         )
         tok.train(df)
 
@@ -156,9 +144,7 @@ class TestNegativeValueHandling:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"gamma": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"gamma": ["lab"]}
         )
         tok.train(df)
 
@@ -175,9 +161,7 @@ class TestScaling:
             text_mode_default="concept",
             num_type="continuous",
             num_seq="factored",
-            distributions={"normal": ["lab"]},
-            milestone_op="none",
-            milestone_ip="none",
+            distributions={"normal": ["lab"]}
         )
         tok.train(df)
 
@@ -197,9 +181,7 @@ class TestScaling:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            level_threshold=3,
-            milestone_op="none",
-            milestone_ip="none",
+            level_threshold=3
         )
         tok.train(df)
 

@@ -25,7 +25,7 @@ def test_concept_discrete_factored_roundtrip(tmp_path):
     df = df_simple()
     tok = DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq="factored",
-        n_bins=5, level_threshold=3, milestone_op="none", milestone_ip="none",
+        n_bins=5, level_threshold=3,
     )
     tok.train(df)
     ids1, vals1 = tok.encode(df)
@@ -45,7 +45,7 @@ def test_concept_continuous_roundtrip(tmp_path):
     df = df_simple()
     tok = DBTokenizer(
         text_mode_default="concept", num_type="continuous", num_seq="factored",
-        level_threshold=3, milestone_op="none", milestone_ip="none",
+        level_threshold=3,
     )
     tok.train(df)
     ids1, vals1 = tok.encode(df)
@@ -64,7 +64,6 @@ def test_pair_override_roundtrip(tmp_path):
         text_mode_default="concept", num_type="discrete", num_seq="factored",
         n_bins=5, level_threshold=3,
         text_mode_overrides={("lab", "glucose"): "concept"},
-        milestone_op="none", milestone_ip="none",
     )
     tok.train(df)
     ids1, vals1 = tok.encode(df)
@@ -83,7 +82,7 @@ def test_milestone_config_roundtrip(tmp_path):
     tok = DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq="factored",
         n_bins=5, level_threshold=3,
-        milestone_op="week", milestone_ip="daily",
+        milestone_per_state={"default": "week"},
     )
     tok.train(df)
     ids1, vals1 = tok.encode(df)
@@ -91,8 +90,7 @@ def test_milestone_config_roundtrip(tmp_path):
     save_path = str(tmp_path / "tok_ms")
     tok.save(save_path)
     tok2 = DBTokenizer.load(save_path)
-    assert tok2.milestone_op == "week"
-    assert tok2.milestone_ip == "daily"
+    assert tok2.milestone_per_state == {"default": "week"}
     ids2, vals2 = tok2.encode(df)
     assert ids1 == ids2
 
@@ -101,7 +99,7 @@ def test_decode_after_load(tmp_path):
     df = df_simple()
     tok = DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq="factored",
-        n_bins=5, level_threshold=3, milestone_op="none", milestone_ip="none",
+        n_bins=5, level_threshold=3,
     )
     tok.train(df)
     ids, vals = tok.encode(df)
@@ -128,7 +126,6 @@ def test_bpe_roundtrip(tmp_path):
         text_mode_default="auto", text_mode_threshold=64,
         num_type="discrete", num_seq="factored",
         n_bins=5, level_threshold=3, final_vocab_size=512,
-        milestone_op="none", milestone_ip="none",
     )
     tok.train(df)
     ids1, vals1 = tok.encode(df)
@@ -151,7 +148,6 @@ def test_bpe_decode_after_load(tmp_path):
         text_mode_default="auto", text_mode_threshold=64,
         num_type="discrete", num_seq="factored",
         n_bins=5, level_threshold=3, final_vocab_size=512,
-        milestone_op="none", milestone_ip="none",
     )
     tok.train(df)
     ids, vals = tok.encode(df)

@@ -37,7 +37,7 @@ ids, vals = tok.encode(df)  # produce token sequences
 3. **Numeric transform fitting** — per `(class, text_value)` group:
    - ≤ `level_threshold` distinct values → categorical **level** tokens (`<|L0|>`, `<|L1|>`, …)
    - Otherwise → quantile **bins** (discrete mode) or distribution **scaling** (continuous mode)
-4. **Time-delta fitting** — separate transforms for inpatient (`delta_time_ip`) and outpatient (`delta_time_op`) time gaps.
+4. **Time-delta fitting** — one distribution per temporal scale band (see [Temporal Scales](#temporal-scales)).
 5. **Vocabulary construction** — special tokens + concept tokens + (optionally) BPE merges.
 
 ### Encoding (`encode`)
@@ -69,8 +69,8 @@ By default, `text_mode_default="auto"` selects BPE for classes with more than
 ```python
 tok = DBTokenizer(
     text_mode_overrides={
-        "admission": "bpe",               # class-level. force BPE for class "admission" even if it had low cardinality
-        ("notes", "N/A"): "concept",      # pair-level. force concept token for "N/A" in "notes" class, even if "notes" overall uses BPE    
+        "admission": "bpe",               # class-level: force BPE for class "admission"
+        ("notes", "N/A"): "concept",      # pair-level: force concept for "N/A" in "notes"
     },
 )
 ```
@@ -111,33 +111,53 @@ fall back to factored placement.
 
 ## Time Tokens
 
-### Time Deltas
+### Temporal Scales
 
-Two token families track inter-event time gaps:
+Time-delta distributions are split by user-specified thresholds. Each band
+gets its own fitted distribution and token family. This cleanly handles data
+with multiple time scales (e.g. short inpatient gaps vs. long outpatient gaps)
+without any hard-coded state logic.
 
-- `<|delta_time_ip|>` — inpatient (between admission and discharge)
-- `<|delta_time_op|>` — outpatient (default)
+```python
+# Single global distribution (default — no thresholds)
+tok = DBTokenizer()
+# → tokens: <|delta_time_0|>
 
-In **discrete** mode, time deltas are binned: `<|delta_time_op_Q3|>`.
-In **continuous** mode, a scaled float is emitted alongside the delta token.
+# Two bands split at 24 hours
+tok = DBTokenizer(time_scales=[86400.0])
+# → tokens: <|delta_time_0|>  (≤ 24 h)
+#           <|delta_time_1|>  (> 24 h)
 
-Inpatient / outpatient state is tracked automatically from
-`admission_classes` and `discharge_classes`.
+# Named bands
+tok = DBTokenizer(
+    time_scales=[86400.0],
+    time_scale_names=["short", "long"],
+)
+# → tokens: <|delta_time_short|>, <|delta_time_long|>
+```
+
+In **discrete** mode, the delta is also binned: `<|delta_time_short|>` `<|Q3|>`,
+or as a single fused token `<|delta_time_short_Q3|>`.  
+In **continuous** mode, a scaled float is emitted alongside the marker token.
 
 ### Milestones
 
-Configurable calendar-boundary markers injected when the time gap crosses
-a milestone epoch. Uses a Kalman-filter style: only the *most recent*
-milestone is emitted (not every intermediate one).
+Calendar-boundary markers are injected when a time gap crosses an epoch
+boundary. Uses a Kalman-filter style: only the *most recent* milestone is
+emitted (not every intermediate one). Milestone granularity is configured
+per state (see [State Machine](#state-machine)).
 
-| Frequency | Token Example | Config |
+| Granularity | Token Example | Config Value |
 |---|---|---|
-| Week of year | `<\|ms_week_12\|>` | `milestone_op="week"` |
-| Month | `<\|ms_month_3\|>` | `milestone_op="month"` |
-| Daily | `<\|ms_day_5\|>` | `milestone_ip="daily"` |
-| 12-hour shift | `<\|ms_12hr_1\|>` | `milestone_ip="12hr"` |
-| 8-hour shift | `<\|ms_8hr_2\|>` | `milestone_ip="8hr"` |
-| None | *(suppressed)* | `milestone_op="none"` |
+| Week of year | `<\|ms_week_12\|>` | `"week"` |
+| Month | `<\|ms_month_3\|>` | `"month"` |
+| Day of week | `<\|ms_day_5\|>` | `"daily"` |
+| 12-hour shift | `<\|ms_12hr_1\|>` | `"12hr"` |
+| 8-hour shift | `<\|ms_8hr_2\|>` | `"8hr"` |
+| None | *(suppressed)* | `"none"` |
+
+The `milestone_shift_start` parameter (default `7`, i.e. 07:00) sets the
+hour-of-day at which shift-based boundaries (`8hr`, `12hr`) begin.
 
 ### Age Tokens
 
@@ -147,17 +167,58 @@ and `text_value == birth_date_text_value`.
 
 ---
 
+## State Machine
+
+A lightweight state machine controls which milestone granularity is used at
+each point in a patient's sequence. State does **not** affect time-delta
+distributions (those are purely threshold-based).
+
+```python
+tok = DBTokenizer(
+    # State definitions
+    state_transitions={
+        "inpatient":  ["admission"],   # entering "admission" event → inpatient state
+        "outpatient": ["discharge"],   # entering "discharge" event → outpatient state
+    },
+    initial_state="outpatient",        # state before the first transition
+
+    # Milestone granularity per state
+    milestone_per_state={
+        "inpatient":  "8hr",   # 8-hour shift markers during admission
+        "outpatient": "week",  # weekly markers otherwise
+    },
+    milestone_shift_start=7,           # shifts start at 07:00
+)
+```
+
+**Rules:**
+- `state_transitions` maps state name → list of `class` values that trigger entry into that state.
+- Transitions use **last-trigger-wins**: if a row's `class` matches multiple states, the last match in dict iteration order wins.
+- The state is reset to `initial_state` at the start of each patient.
+- State transition happens **after** the current row's time-delta and milestone are emitted, so the triggering event itself is encoded under the previous state.
+- States not listed in `milestone_per_state` silently use `"none"` (no milestones).
+
+**Minimal example — milestones only, no time-scale split:**
+
+```python
+tok = DBTokenizer(
+    milestone_per_state={"default": "week"},
+)
+```
+
+---
+
 ## Save / Load
 
 ```python
 tok.save("path/to/tokenizer")
-# writes tokenizer.json + tokenizer.bpe (if BPE enabled)
+# writes tokenizer.json (+ tokenizer.bpe if BPE enabled)
 
 tok2 = DBTokenizer.load("path/to/tokenizer")
 ```
 
 JSON stores all configuration and learned parameters. The BPE encoding object
-is pickled separately (tiktoken `Encoding`).
+is saved separately (tiktoken `Encoding`).
 
 ---
 
@@ -166,11 +227,11 @@ is pickled separately (tiktoken `Encoding`).
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `text_mode_default` | str | `"auto"` | `"auto"`, `"bpe"`, or `"concept"` |
-| `text_mode_overrides` | dict | `None` | Per-class or per-(class, text_value) overrides |
+| `text_mode_overrides` | dict | `None` | Per-class or per-`(class, text_value)` mode overrides |
 | `text_mode_threshold` | int | `64` | Auto mode: classes with > threshold unique values use BPE |
 | `num_type` | str | `"discrete"` | `"discrete"` or `"continuous"` |
 | `num_seq` | str | `"factored"` | `"fused"` or `"factored"` |
-| `n_bins` | int | `10` | Number of quantile bins (discrete) |
+| `n_bins` | int | `10` | Number of quantile bins (discrete mode) |
 | `level_threshold` | int | `10` | Max distinct values for level tokens |
 | `bin_clip_min` | float | `1.0` | Lower percentile clip for binning |
 | `bin_clip_max` | float | `99.0` | Upper percentile clip for binning |
@@ -180,14 +241,15 @@ is pickled separately (tiktoken `Encoding`).
 | `final_vocab_size` | int | `4096` | Target BPE vocab size (including specials) |
 | `split_pattern` | str | GPT-4 pattern | Regex for BPE pre-tokenization |
 | `bpe_training_sample` | int\|float | `None` | Subsample BPE training texts |
-| `bpe_training_seed` | int | `42` | RNG seed for training subsampling |
-| `admission_classes` | list | `[]` | Class names that mark hospital admission |
-| `discharge_classes` | list | `[]` | Class names that mark hospital discharge |
-| `milestone_ip` | str | `"daily"` | Inpatient milestone frequency |
-| `milestone_op` | str | `"week"` | Outpatient milestone frequency |
-| `milestone_shift_start` | int | `7` | Hour for shift-based milestone start |
+| `bpe_training_seed` | int | `42` | RNG seed for BPE training subsampling |
+| `time_scales` | list[float] | `None` | Sorted thresholds (seconds) splitting time-delta bands, e.g. `[86400.0]` |
+| `time_scale_names` | list[str] | `None` | Names for each band; length must equal `len(time_scales) + 1` |
+| `state_transitions` | dict | `None` | Maps state name → list of `class` values that trigger it |
+| `initial_state` | str | `"default"` | Starting state for each patient |
+| `milestone_per_state` | dict | `None` | Maps state name → milestone granularity (`"week"`, `"month"`, `"daily"`, `"12hr"`, `"8hr"`, `"none"`) |
+| `milestone_shift_start` | int | `7` | Hour-of-day for shift-based milestone boundaries |
 | `birth_date_class` | str | `"demographic"` | Class name for birth-date rows |
-| `birth_date_text_value` | str | `"birth_date"` | text_value for birth-date rows |
+| `birth_date_text_value` | str | `"birth_date"` | `text_value` for birth-date rows |
 
 ---
 
@@ -207,12 +269,19 @@ pip install tiktoken
 
 ---
 
-## Additional Methods
+## API Reference
 
 | Method | Description |
 |---|---|
-| `encode_debug(df)` | Returns the DataFrame with a `tokens` column showing human-readable token strings per row |
+| `train(df)` | Fit vocab, numeric transforms, and time-delta distributions |
+| `encode(df)` | Encode DataFrame → `(ids, vals)` |
+| `encode_debug(df)` | Returns the DataFrame with a `tokens` column of human-readable strings per row |
 | `decode(ids)` | Decode a list of token IDs back to token strings |
 | `decode_token(id)` | Decode a single token ID |
+| `decode_to_dataframe(ids, vals, reference_time, start_patient_id)` | Reconstruct a DataFrame from a token stream |
+| `classify_token_ids(ids)` | Classify each token ID into a type string (`"sos"`, `"eos"`, `"time_delta"`, `"class"`, `"concept"`, `"Q"`, `"L"`, `"milestone"`, `"age"`, etc.) |
+| `get_numeric_context(ids)` | Return the fitted numeric params dict for each token position that needs density adjustment |
+| `save(path)` | Serialise to `<path>.json` (+ `<path>.bpe` if BPE enabled) |
+| `load(path)` | Class method — deserialise from disk |
 | `scale(params, x)` | Apply learned scaling transform |
 | `unscale(params, x)` | Invert scaling transform |

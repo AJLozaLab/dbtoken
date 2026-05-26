@@ -83,9 +83,7 @@ def discrete_tok():
         num_type="discrete",
         num_seq="factored",
         n_bins=4,
-        level_threshold=10,
-        milestone_ip="none",
-        milestone_op="none",
+        level_threshold=10
     )
     tok.train(df)
     return tok
@@ -99,9 +97,7 @@ def continuous_tok():
         num_type="continuous",
         num_seq="factored",
         n_bins=4,
-        level_threshold=10,
-        milestone_ip="none",
-        milestone_op="none",
+        level_threshold=10
     )
     tok.train(df)
     return tok
@@ -115,9 +111,7 @@ def fused_tok():
         num_type="discrete",
         num_seq="fused",
         n_bins=4,
-        level_threshold=10,
-        milestone_ip="none",
-        milestone_op="none",
+        level_threshold=10
     )
     tok.train(df)
     return tok
@@ -131,9 +125,7 @@ def level_tok():
         num_type="discrete",
         num_seq="factored",
         n_bins=4,
-        level_threshold=10,
-        milestone_ip="none",
-        milestone_op="none",
+        level_threshold=10
     )
     tok.train(df)
     return tok

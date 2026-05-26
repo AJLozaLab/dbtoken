@@ -22,8 +22,7 @@ class TestConceptDiscrete:
             num_seq="factored",
             n_bins=5,
             level_threshold=10,
-            milestone_ip="daily",
-            milestone_op="week",
+            milestone_per_state={"default": "week"},
         )
         tok.train(df)
         ids, vals = tok.encode(df)

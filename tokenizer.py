@@ -204,12 +204,13 @@ class DBTokenizer:
             r"""|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]"""
             r"""|\s+(?!\S)|\s+"""
         ),
-        # --- clinical state ---
-        admission_classes: Optional[List[str]] = None,
-        discharge_classes: Optional[List[str]] = None,
-        # --- milestones ---
-        milestone_ip: str = "daily",              # inpatient milestone
-        milestone_op: str = "week",               # outpatient milestone
+        # --- temporal scales (time-delta distributions) ---
+        time_scales: Optional[List[float]] = None,   # sorted thresholds, e.g. [86400.0]
+        time_scale_names: Optional[List[str]] = None, # optional labels per band
+        # --- state machine (milestones) ---
+        state_transitions: Optional[Dict[str, List[str]]] = None,
+        initial_state: str = "default",
+        milestone_per_state: Optional[Dict[str, str]] = None,
         milestone_shift_start: int = 7,           # hour-of-day for shift start
         # --- demographics ---
         birth_date_class: str = "demographic",
@@ -225,10 +226,27 @@ class DBTokenizer:
             raise ValueError(f"num_type must be 'discrete'|'continuous', got '{num_type}'")
         if num_seq not in ("fused", "factored"):
             raise ValueError(f"num_seq must be 'fused'|'factored', got '{num_seq}'")
-        if milestone_ip not in _MILESTONE_TYPES:
-            raise ValueError(f"milestone_ip must be one of {_MILESTONE_TYPES}")
-        if milestone_op not in _MILESTONE_TYPES:
-            raise ValueError(f"milestone_op must be one of {_MILESTONE_TYPES}")
+        # Validate time_scales / time_scale_names
+        if time_scales is not None:
+            if sorted(time_scales) != list(time_scales):
+                raise ValueError("time_scales must be a sorted (ascending) list of floats")
+            if any(t <= 0 for t in time_scales):
+                raise ValueError("time_scales values must be positive")
+        if time_scale_names is not None:
+            n_bands = (len(time_scales) + 1) if time_scales else 1
+            if len(time_scale_names) != n_bands:
+                raise ValueError(
+                    f"time_scale_names must have length len(time_scales)+1 "
+                    f"(= {n_bands}), got {len(time_scale_names)}"
+                )
+        # Validate milestone_per_state values
+        if milestone_per_state is not None:
+            for state, ms in milestone_per_state.items():
+                if ms not in _MILESTONE_TYPES:
+                    raise ValueError(
+                        f"milestone_per_state[{state!r}] must be one of "
+                        f"{_MILESTONE_TYPES}, got {ms!r}"
+                    )
 
         # Store config
         self.text_mode_default = text_mode_default
@@ -245,10 +263,11 @@ class DBTokenizer:
         self.distributions = distributions
         self.final_vocab_size = final_vocab_size
         self.split_pattern = split_pattern
-        self.admission_classes: List[str] = admission_classes or []
-        self.discharge_classes: List[str] = discharge_classes or []
-        self.milestone_ip = milestone_ip
-        self.milestone_op = milestone_op
+        self.time_scales: List[float] = list(time_scales) if time_scales else []
+        self.time_scale_names: Optional[List[str]] = time_scale_names
+        self.state_transitions: Dict[str, List[str]] = state_transitions or {}
+        self.initial_state: str = initial_state
+        self.milestone_per_state: Dict[str, str] = milestone_per_state or {}
         self.milestone_shift_start = milestone_shift_start
         self.birth_date_class = birth_date_class
         self.birth_date_text_value = birth_date_text_value
@@ -553,7 +572,7 @@ class DBTokenizer:
     # ·····  time-delta training  ······································
 
     def _train_time_deltas(self, df: pl.DataFrame):
-        """Fit time-delta distributions/bins for IP and OP periods."""
+        """Fit time-delta distributions/bins per temporal scale band."""
         with_deltas = (
             df
             .sort(["id", "time"])
@@ -573,38 +592,42 @@ class DBTokenizer:
             )
             return
 
-        if self.admission_classes and self.discharge_classes:
-            with_deltas = self._compute_admission_state(with_deltas)
-            ip = with_deltas.filter(
-                pl.col("inpatient")
-            ).select("time_delta_s").to_series()
-            op = with_deltas.filter(
-                ~pl.col("inpatient")
-            ).select("time_delta_s").to_series()
+        all_deltas = with_deltas.select("time_delta_s").to_series()
+        scale_keys = self._scale_keys()
+        thresholds = self.time_scales  # sorted list of floats, possibly empty
 
-            if ip.len() > 0:
-                self.time_delta_params["ip"] = self._fit_time_delta_series(ip)
-            if op.len() > 0:
-                self.time_delta_params["op"] = self._fit_time_delta_series(op)
-
-            if "ip" not in self.time_delta_params or \
-               "op" not in self.time_delta_params:
-                global_p = self._fit_time_delta_series(
-                    with_deltas.select("time_delta_s").to_series()
-                )
-                self.time_delta_params.setdefault("ip", global_p)
-                self.time_delta_params.setdefault("op", global_p)
+        if not thresholds:
+            # Single global distribution
+            self.time_delta_params[scale_keys[0]] = self._fit_time_delta_series(all_deltas)
         else:
-            global_p = self._fit_time_delta_series(
-                with_deltas.select("time_delta_s").to_series()
-            )
-            self.time_delta_params["ip"] = global_p
-            self.time_delta_params["op"] = global_p
+            global_p = None  # computed lazily if a band is too sparse
+            lo = 0.0
+            for i, sk in enumerate(scale_keys):
+                hi = thresholds[i] if i < len(thresholds) else float("inf")
+                band = (
+                    with_deltas
+                    .filter(
+                        (pl.col("time_delta_s") > lo)
+                        & (pl.col("time_delta_s") <= hi if hi != float("inf")
+                           else pl.lit(True))
+                    )
+                    .select("time_delta_s")
+                    .to_series()
+                )
+                if band.len() > 1:
+                    self.time_delta_params[sk] = self._fit_time_delta_series(band)
+                else:
+                    # Fallback to global params for sparse bands
+                    if global_p is None:
+                        global_p = self._fit_time_delta_series(all_deltas)
+                    self.time_delta_params[sk] = global_p
+                lo = hi
 
-        for k in ("ip", "op"):
-            p = self.time_delta_params.get(k, {})
-            print(f"  {k.upper()} time-delta: {p.get('type', 'N/A')} "
+        for sk in scale_keys:
+            p = self.time_delta_params.get(sk, {})
+            print(f"  scale '{sk}' time-delta: {p.get('type', 'N/A')} "
                   f"({p.get('distribution', '-')})")
+
 
     def _fit_time_delta_series(self, series: pl.Series) -> dict:
         vals = series.to_numpy().astype(float)
@@ -636,22 +659,35 @@ class DBTokenizer:
             edges = [float(np.percentile(vals, p * 100)) for p in p_edges]
             return {"type": "bins", "edges": edges}
 
-    # ·····  admission state  ··········································
+    # ·····  delta scale classification  ······························
 
-    def _compute_admission_state(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Add boolean ``inpatient`` column using admission / discharge events."""
-        return df.with_columns(
-            (
-                pl.col("class").is_in(self.admission_classes).cast(pl.Int8)
-                - pl.col("class").is_in(self.discharge_classes).cast(pl.Int8)
-            )
-            .cum_sum()
-            .shift(1, fill_value=0)
-            .over("id")
-            .clip(0, 1)
-            .cast(pl.Boolean)
-            .alias("inpatient")
-        )
+    def _classify_delta_scale(self, dt: float) -> str:
+        """Return the scale key for a given time delta *dt* (seconds).
+
+        Bands are defined by ``self.time_scales`` (sorted thresholds).
+        Band 0: dt <= time_scales[0]
+        Band i: time_scales[i-1] < dt <= time_scales[i]
+        Band N: dt > time_scales[-1]
+        """
+        keys = self._scale_keys()
+        for i, threshold in enumerate(self.time_scales):
+            if dt <= threshold:
+                return keys[i]
+        return keys[-1]
+
+    # ·····  scale keys helper  ········································
+
+    def _scale_keys(self) -> List[str]:
+        """Return the ordered list of time-scale band key strings.
+
+        If ``time_scale_names`` is set, those names are returned directly.
+        Otherwise index strings '0', '1', ... are generated, one per band
+        (number of bands = len(time_scales) + 1, minimum 1).
+        """
+        n_bands = len(self.time_scales) + 1 if self.time_scales else 1
+        if self.time_scale_names is not None:
+            return list(self.time_scale_names)
+        return [str(i) for i in range(n_bands)]
 
     # ·····  vocabulary / BPE training  ································
 
@@ -660,7 +696,9 @@ class DBTokenizer:
 
         # ── Standard special tokens ───────────────────────────────────
         special: List[str] = ["<|sos|>", "<|eos|>", "<|pad|>"]
-        special.extend(["<|delta_time_ip|>", "<|delta_time_op|>", "<|NUM|>"])
+        for sk in self._scale_keys():
+            special.append(f"<|delta_time_{sk}|>")
+        special.append("<|NUM|>")
 
         for i in range(self.n_bins + 1):
             special.append(f"<|Q{i}|>")
@@ -692,9 +730,9 @@ class DBTokenizer:
 
         # ── Fused time-delta tokens (fused + discrete) ───────────────
         if self.num_seq == "fused" and self.num_type == "discrete":
-            for prefix in ("delta_time_ip", "delta_time_op"):
+            for sk in self._scale_keys():
                 for i in range(self.n_bins + 1):
-                    special.append(f"<|{prefix}_Q{i}|>")
+                    special.append(f"<|delta_time_{sk}_Q{i}|>")
 
         # ── Concept text tokens ──────────────────────────────────────
         concept_tokens: List[str] = []
@@ -823,16 +861,14 @@ class DBTokenizer:
         last_id = None
         last_age: Optional[int] = None
         last_time: Optional[datetime] = None
-        last_ms_ip = None    # last milestone boundary key (IP)
-        last_ms_op = None    # last milestone boundary key (OP)
-        is_ip = False
+        current_state: str = self.initial_state
+        last_ms = None    # last milestone boundary key
 
         for row in df_e.iter_rows(named=True):
             cls   = row["class"]
             tv    = row["text_value"]
             nv    = row["numeric_value"]
             ts    = row["time"]                   # datetime
-            is_ip = row.get("inpatient", False)
 
             # ── Skip demographic birth-date rows ──────────────────────
             if cls == self.birth_date_class and tv == self.birth_date_text_value:
@@ -845,8 +881,8 @@ class DBTokenizer:
                 last_id = row["id"]
                 last_time = None   # explicitly no delta from birth row
                 last_age = None
-                last_ms_ip = None
-                last_ms_op = None
+                last_ms = None
+                current_state = self.initial_state
 
                 # Emit SOS for new patient
                 ids.append(self.vocab["<|sos|>"])
@@ -869,8 +905,8 @@ class DBTokenizer:
                 last_id = row["id"]
                 last_time = None
                 last_age = None
-                last_ms_ip = None
-                last_ms_op = None
+                last_ms = None
+                current_state = self.initial_state
                 # Emit initial age if available
                 age = self._compute_age(row["id"], ts)
                 if age is not None and 0 <= age <= _MAX_AGE:
@@ -884,19 +920,17 @@ class DBTokenizer:
                 dt = (ts - last_time).total_seconds()
                 if dt > 0:
                     # Emit time delta
-                    self._emit_time_delta(ids, vals, dt, is_ip)
+                    scale_key = self._classify_delta_scale(dt)
+                    self._emit_time_delta(ids, vals, dt, scale_key)
 
-                    # Determine milestone kind for current context
-                    ms_kind = self.milestone_ip if is_ip else self.milestone_op
+                    # Determine milestone kind from current state
+                    ms_kind = self.milestone_per_state.get(current_state, "none")
                     if ms_kind != "none":
                         cur_boundary = _milestone_boundary(
                             ms_kind, ts, self.milestone_shift_start
                         )
-                        prev_boundary = (
-                            last_ms_ip if is_ip else last_ms_op
-                        )
                         # Emit milestone only if boundary changed
-                        if cur_boundary != prev_boundary:
+                        if cur_boundary != last_ms:
                             ms_tok = _milestone_marker(
                                 ms_kind, ts, self.milestone_shift_start
                             )
@@ -904,11 +938,13 @@ class DBTokenizer:
                                 ids.append(self.vocab[ms_tok])
                                 if vals is not None:
                                     vals.append(float("nan"))
-                        # Update last boundary
-                        if is_ip:
-                            last_ms_ip = cur_boundary
-                        else:
-                            last_ms_op = cur_boundary
+                        last_ms = cur_boundary
+
+            # ── Update state machine ──────────────────────────────────
+            for state, trigger_classes in self.state_transitions.items():
+                if cls in trigger_classes:
+                    current_state = state
+                    last_ms = None  # reset milestone boundary on state change
 
             # ── Age milestone (Kalman-filter style) ───────────────────
             age = self._compute_age(row["id"], ts)
@@ -974,18 +1010,17 @@ class DBTokenizer:
     # ·····  emit helpers  ·············································
 
     def _emit_time_delta(
-        self, ids: list, vals: Optional[list], dt: float, is_ip: bool,
+        self, ids: list, vals: Optional[list], dt: float, scale_key: str,
     ):
-        """Emit time-delta token(s)."""
-        td_key = "ip" if is_ip else "op"
-        td_name = f"<|delta_time_{td_key}|>"
-        td_p = self.time_delta_params.get(td_key)
+        """Emit time-delta token(s) for the given scale band *scale_key*."""
+        td_name = f"<|delta_time_{scale_key}|>"
+        td_p = self.time_delta_params.get(scale_key)
         if td_p is None:
             return
 
         if self.num_seq == "fused" and self.num_type == "discrete":
             bi = int(np.digitize(dt, td_p["edges"], right=False))
-            ids.append(self.vocab[f"<|delta_time_{td_key}_Q{bi}|>"])
+            ids.append(self.vocab[f"<|delta_time_{scale_key}_Q{bi}|>"])
             if vals is not None:
                 vals.append(float("nan"))
 
@@ -1086,11 +1121,6 @@ class DBTokenizer:
         df = df.sort(["id", "time"])
 
         # ── Admission state ──────────────────────────────────────────
-        if self.admission_classes and self.discharge_classes:
-            df = self._compute_admission_state(df)
-        else:
-            df = df.with_columns(pl.lit(False).alias("inpatient"))
-
         # ── BPE cache index ──────────────────────────────────────────
         # Build a mask of rows that use BPE text mode (at pair level)
         text_modes_list = []
@@ -1165,11 +1195,13 @@ class DBTokenizer:
         _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
         _re_age     = _re.compile(r"^<\|age_\d+\|>$")
         _re_ms      = _re.compile(r"^<\|ms_")
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        # Build dynamic patterns from actual scale keys
+        _sk_pat = "|".join(_re.escape(sk) for sk in self._scale_keys())
+        _re_td_fuse = _re.compile(rf"^<\|delta_time_(?:{_sk_pat})_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(rf"^<\|delta_time_(?:{_sk_pat})\|>$")
         _all_special_re = _re.compile(
-            r"^<\|(?:sos|eos|pad|NUM|ROW|"
-            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            rf"^<\|(?:sos|eos|pad|NUM|ROW|"
+            rf"delta_time_(?:{_sk_pat})(?:_Q\d+)?|"
             r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
         )
 
@@ -1249,8 +1281,9 @@ class DBTokenizer:
         if not hasattr(self, "_token_type_lookup"):
             self._token_type_lookup = self._build_token_type_lookup()
 
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        _sk_pat = "|".join(_re.escape(sk) for sk in self._scale_keys())
+        _re_td_fuse = _re.compile(rf"^<\|delta_time_(?:{_sk_pat})_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(rf"^<\|delta_time_({_sk_pat})\|>$")
 
         types = self.classify_token_ids(ids)
         out: List[Optional[dict]] = [None] * len(ids)
@@ -1276,9 +1309,11 @@ class DBTokenizer:
 
             # Time-delta fused: params come from time_delta_params
             if ttype == "time_delta_fused":
-                m = _re_td_fuse.match(tok)
-                if m:
-                    td = self.time_delta_params.get(m.group(1))
+                if _re_td_fuse.match(tok):
+                    # Extract scale key: <|delta_time_SK_Qn|> → SK
+                    inner = tok[len("<|delta_time_"):-2]   # "SK_Qn"
+                    sk = inner.rsplit("_Q", 1)[0]
+                    td = self.time_delta_params.get(sk)
                     if td is not None:
                         out[i] = {**td, "_is_time_delta": True}
                 continue
@@ -1337,9 +1372,8 @@ class DBTokenizer:
         last_id = None
         last_age: Optional[int] = None
         last_time: Optional[datetime] = None
-        last_ms_ip = None
-        last_ms_op = None
-        is_ip = False
+        current_state: str = self.initial_state
+        last_ms = None
 
         for row in df_e.iter_rows(named=True):
             rt: List[str] = []
@@ -1347,7 +1381,7 @@ class DBTokenizer:
             tv    = row["text_value"]
             nv    = row["numeric_value"]
             ts    = row["time"]
-            is_ip = row.get("inpatient", False)
+
 
             # ── Demographic birth-date row ────────────────────────────
             if cls == self.birth_date_class and tv == self.birth_date_text_value:
@@ -1357,8 +1391,8 @@ class DBTokenizer:
                 last_id = row["id"]
                 last_time = None
                 last_age = None
-                last_ms_ip = None
-                last_ms_op = None
+                last_ms = None
+                current_state = self.initial_state
                 # Age will be emitted at the first real event via Kalman check
                 tokens_col.append(rt)
                 continue
@@ -1371,8 +1405,8 @@ class DBTokenizer:
                 last_id = row["id"]
                 last_time = None
                 last_age = None
-                last_ms_ip = None
-                last_ms_op = None
+                last_ms = None
+                current_state = self.initial_state
                 age = self._compute_age(row["id"], ts)
                 if age is not None and 0 <= age <= _MAX_AGE:
                     rt.append(f"<|age_{age}|>")
@@ -1382,45 +1416,47 @@ class DBTokenizer:
             if ts is not None and last_time is not None:
                 dt = (ts - last_time).total_seconds()
                 if dt > 0:
-                    td_key = "ip" if is_ip else "op"
-                    td_p = self.time_delta_params.get(td_key)
+                    sk = self._classify_delta_scale(dt)
+                    td_p = self.time_delta_params.get(sk)
                     if td_p is not None:
                         if self.num_seq == "fused" and self.num_type == "discrete":
                             bi = int(np.digitize(dt, td_p["edges"], right=False))
-                            rt.append(f"<|delta_time_{td_key}_Q{bi}|>")
+                            rt.append(f"<|delta_time_{sk}_Q{bi}|>")
                         elif self.num_type == "discrete":
                             bi = int(np.digitize(dt, td_p["edges"], right=False))
                             rt.extend([
-                                f"<|delta_time_{td_key}|>",
+                                f"<|delta_time_{sk}|>",
                                 f"<|Q{bi}|>"
                             ])
                         elif self.num_seq == "fused":
                             s = self._scale_td(dt, td_p)
-                            rt.append(f"<|delta_time_{td_key}|>({s:.3f})")
+                            rt.append(f"<|delta_time_{sk}|>({s:.3f})")
                         else:
                             s = self._scale_td(dt, td_p)
                             rt.extend([
-                                f"<|delta_time_{td_key}|>",
+                                f"<|delta_time_{sk}|>",
                                 f"<|NUM|>({s:.3f})"
                             ])
 
                     # Milestone
-                    ms_kind = self.milestone_ip if is_ip else self.milestone_op
+                    ms_kind = self.milestone_per_state.get(current_state, "none")
                     if ms_kind != "none":
                         cur_boundary = _milestone_boundary(
                             ms_kind, ts, self.milestone_shift_start
                         )
-                        prev_boundary = last_ms_ip if is_ip else last_ms_op
-                        if cur_boundary != prev_boundary:
+                        if cur_boundary != last_ms:
                             ms_tok = _milestone_marker(
                                 ms_kind, ts, self.milestone_shift_start
                             )
                             if ms_tok is not None:
                                 rt.append(ms_tok)
-                        if is_ip:
-                            last_ms_ip = cur_boundary
-                        else:
-                            last_ms_op = cur_boundary
+                        last_ms = cur_boundary
+
+            # ── Update state machine ─────────────────────────────────────
+            for state, trigger_classes in self.state_transitions.items():
+                if cls in trigger_classes:
+                    current_state = state
+                    last_ms = None  # reset milestone boundary on state change
 
             # ── Age milestone ─────────────────────────────────────────
             age = self._compute_age(row["id"], ts)
@@ -1562,20 +1598,21 @@ class DBTokenizer:
         _HARD_SPECIALS = {
             "<|sos|>", "<|eos|>", "<|pad|>",
             "<|NUM|>", "<|ROW|>",
-            "<|delta_time_ip|>", "<|delta_time_op|>",
         }
         # Patterns for structured special tokens
         _re_q       = _re.compile(r"^<\|Q(\d+)\|>$")
         _re_l       = _re.compile(r"^<\|L(\d+)\|>$")
         _re_age     = _re.compile(r"^<\|age_\d+\|>$")
         _re_ms      = _re.compile(r"^<\|ms_")
-        _re_td_fuse = _re.compile(r"^<\|delta_time_(ip|op)_Q(\d+)\|>$")
-        _re_td_mrk  = _re.compile(r"^<\|delta_time_(ip|op)\|>$")
+        # Build dynamic patterns from actual scale keys
+        _sk_pat = "|".join(_re.escape(sk) for sk in self._scale_keys())
+        _re_td_fuse = _re.compile(rf"^<\|delta_time_({_sk_pat})_Q(\d+)\|>$")
+        _re_td_mrk  = _re.compile(rf"^<\|delta_time_({_sk_pat})\|>$")
 
         # Class tokens: <|...|> tokens that are NOT any of the above
         _all_special_re = _re.compile(
-            r"^<\|(?:sos|eos|pad|NUM|ROW|"
-            r"delta_time_(?:ip|op)(?:_Q\d+)?|"
+            rf"^<\|(?:sos|eos|pad|NUM|ROW|"
+            rf"delta_time_(?:{_sk_pat})(?:_Q\d+)?|"
             r"Q\d+|L\d+|age_\d+|ms_.+)\|>$"
         )
         _class_token_set = {
@@ -1850,10 +1887,11 @@ class DBTokenizer:
             "distributions": self.distributions,
             "final_vocab_size": self.final_vocab_size,
             "split_pattern": self.split_pattern,
-            "admission_classes": self.admission_classes,
-            "discharge_classes": self.discharge_classes,
-            "milestone_ip": self.milestone_ip,
-            "milestone_op": self.milestone_op,
+            "time_scales": self.time_scales,
+            "time_scale_names": self.time_scale_names,
+            "state_transitions": self.state_transitions,
+            "initial_state": self.initial_state,
+            "milestone_per_state": self.milestone_per_state,
             "milestone_shift_start": self.milestone_shift_start,
             "birth_date_class": self.birth_date_class,
             "birth_date_text_value": self.birth_date_text_value,
@@ -1909,10 +1947,11 @@ class DBTokenizer:
             distributions=cfg.get("distributions"),
             final_vocab_size=cfg["final_vocab_size"],
             split_pattern=cfg["split_pattern"],
-            admission_classes=cfg.get("admission_classes", []),
-            discharge_classes=cfg.get("discharge_classes", []),
-            milestone_ip=cfg.get("milestone_ip", "daily"),
-            milestone_op=cfg.get("milestone_op", "week"),
+            time_scales=cfg.get("time_scales", []),
+            time_scale_names=cfg.get("time_scale_names"),
+            state_transitions=cfg.get("state_transitions", {}),
+            initial_state=cfg.get("initial_state", "default"),
+            milestone_per_state=cfg.get("milestone_per_state", {}),
             milestone_shift_start=cfg.get("milestone_shift_start", 7),
             birth_date_class=cfg.get("birth_date_class", "demographic"),
             birth_date_text_value=cfg.get("birth_date_text_value", "birth_date"),

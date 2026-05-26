@@ -83,8 +83,7 @@ def test_demo_concept_discrete_factored():
         num_seq="factored",
         n_bins=5,
         level_threshold=3,
-        milestone_op="week",
-        milestone_ip="daily",
+        milestone_per_state={"default": "week"},
     )
     tok.train(df)
 
@@ -130,8 +129,6 @@ def test_demo_concept_continuous_fused():
         num_type="continuous",
         num_seq="fused",
         level_threshold=3,
-        milestone_op="none",
-        milestone_ip="none",
     )
     tok.train(df)
 
@@ -191,8 +188,6 @@ def test_demo_bpe_discrete_factored():
         n_bins=5,
         level_threshold=3,
         final_vocab_size=512,
-        milestone_op="none",
-        milestone_ip="none",
     )
     tok.train(df)
 
@@ -241,8 +236,9 @@ def test_demo_full_featured():
         num_seq="factored",
         n_bins=5,
         level_threshold=3,
-        milestone_op="week",
-        milestone_ip="8hr",
+        state_transitions={"inpatient": ["admission"], "default": ["discharge"]},
+        initial_state="default",
+        milestone_per_state={"inpatient": "8hr", "default": "week"},
         milestone_shift_start=7,
     )
     tok.train(df)
@@ -302,8 +298,6 @@ def test_demo_round_trip():
         num_seq="factored",
         n_bins=5,
         level_threshold=3,
-        milestone_op="none",
-        milestone_ip="none",
     )
     tok.train(df)
 
@@ -352,8 +346,7 @@ def test_demo_vocab_anatomy():
         num_seq="factored",
         n_bins=5,
         level_threshold=3,
-        milestone_op="week",
-        milestone_ip="daily",
+        milestone_per_state={"default": "week"},
     )
     tok.train(df)
 

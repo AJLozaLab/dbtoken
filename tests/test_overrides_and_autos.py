@@ -26,9 +26,7 @@ class TestAutoTextModeResolution:
             text_mode_default="auto",
             text_mode_threshold=64,
             num_type="discrete",
-            num_seq="factored",
-            milestone_op="none",
-            milestone_ip="none",
+            num_seq="factored"
         )
         tok.train(df)
         assert tok.class_text_modes["dx"] == "concept"
@@ -51,9 +49,7 @@ class TestAutoTextModeResolution:
             text_mode_threshold=64,
             num_type="discrete",
             num_seq="factored",
-            final_vocab_size=512,
-            milestone_op="none",
-            milestone_ip="none",
+            final_vocab_size=512
         )
         tok.train(df)
         assert tok.class_text_modes["note"] == "bpe"
@@ -76,9 +72,7 @@ class TestAutoTextModeResolution:
             text_mode_threshold=64,
             num_type="discrete",
             num_seq="factored",
-            final_vocab_size=512,
-            milestone_op="none",
-            milestone_ip="none",
+            final_vocab_size=512
         )
         tok.train(df)
         # threshold=64, n_unique=64 → NOT > 64 → concept
@@ -102,9 +96,7 @@ class TestAutoTextModeResolution:
             text_mode_threshold=64,
             num_type="discrete",
             num_seq="factored",
-            final_vocab_size=512,
-            milestone_op="none",
-            milestone_ip="none",
+            final_vocab_size=512
         )
         tok.train(df)
         assert tok.class_text_modes["note"] == "bpe"
@@ -131,8 +123,6 @@ class TestAutoLevel:
             num_seq="factored",
             n_bins=5,
             level_threshold=10,  # 3 < 10 → level
-            milestone_op="none",
-            milestone_ip="none",
         )
         tok.train(df)
         assert tok.numeric_params[("lab", "platelet")]["type"] == "level"
@@ -156,8 +146,6 @@ class TestAutoLevel:
             num_seq="factored",
             n_bins=5,
             level_threshold=10,  # 20 > 10 → bins
-            milestone_op="none",
-            milestone_ip="none",
         )
         tok.train(df)
         assert tok.numeric_params[("lab", "platelet")]["type"] == "bins"
@@ -216,9 +204,7 @@ class TestPairOverrides:
             num_type="discrete",
             num_seq="factored",
             n_bins=5,
-            text_mode_overrides={"lab": "concept"},
-            milestone_op="none",
-            milestone_ip="none",
+            text_mode_overrides={"lab": "concept"}
         )
         tok.train(df)
         assert tok.class_text_modes["lab"] == "concept"
@@ -251,9 +237,7 @@ class TestFusedBPEFallback:
             text_mode_default="concept",
             num_type="discrete",
             num_seq="fused",
-            n_bins=5,
-            milestone_op="none",
-            milestone_ip="none",
+            n_bins=5
         )
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")

@@ -93,8 +93,7 @@ def test_continuous_fused_concept_scaling():
 def test_concept_no_numeric():
     df = df_no_numeric()
     tok = DBTokenizer(
-        text_mode_default="concept", num_type="discrete", num_seq="factored",
-        milestone_op="none", milestone_ip="none",
+        text_mode_default="concept", num_type="discrete", num_seq="factored"
     )
     tok.train(df)
     ids, vals = tok.encode(df)
@@ -183,8 +182,7 @@ def test_auto_concept_mode():
     df = df_no_numeric()
     tok = DBTokenizer(
         text_mode_default="auto", text_mode_threshold=64,
-        num_type="discrete", num_seq="factored",
-        milestone_op="none", milestone_ip="none",
+        num_type="discrete", num_seq="factored"
     )
     tok.train(df)
     assert tok.class_text_modes.get("dx") == "concept"
@@ -199,7 +197,7 @@ def test_milestones_dropped():
     df = _s()
     tok = DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq="factored",
-        n_bins=5, level_threshold=3, milestone_op="week", milestone_ip="daily",
+        n_bins=5, level_threshold=3, milestone_per_state={"default": "week"},
     )
     tok.train(df)
     ids, vals = tok.encode(df)
@@ -240,8 +238,7 @@ def test_bpe_factored_continuous():
     tok = DBTokenizer(
         text_mode_default="auto", text_mode_threshold=64,
         num_type="continuous", num_seq="factored",
-        level_threshold=3, final_vocab_size=512,
-        milestone_op="none", milestone_ip="none",
+        level_threshold=3, final_vocab_size=512
     )
     tok.train(df)
     ids, vals = tok.encode(df)
@@ -263,21 +260,21 @@ def _s():
 def _tok_bins(num_seq="factored"):
     return DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq=num_seq,
-        n_bins=5, level_threshold=3, milestone_op="none", milestone_ip="none",
+        n_bins=5, level_threshold=3
     )
 
 
 def _tok_level(num_seq="factored"):
     return DBTokenizer(
         text_mode_default="concept", num_type="discrete", num_seq=num_seq,
-        n_bins=5, level_threshold=10, milestone_op="none", milestone_ip="none",
+        n_bins=5, level_threshold=10
     )
 
 
 def _tok_continuous(num_seq="factored"):
     return DBTokenizer(
         text_mode_default="concept", num_type="continuous", num_seq=num_seq,
-        level_threshold=3, milestone_op="none", milestone_ip="none",
+        level_threshold=3
     )
 
 
@@ -285,8 +282,7 @@ def _tok_bpe():
     return DBTokenizer(
         text_mode_default="auto", text_mode_threshold=64,
         num_type="discrete", num_seq="factored",
-        n_bins=5, level_threshold=3, final_vocab_size=512,
-        milestone_op="none", milestone_ip="none",
+        n_bins=5, level_threshold=3, final_vocab_size=512
     )
 
 

@@ -19,7 +19,6 @@ class TestBPEVocabSize:
             num_seq="factored",
             n_bins=5,
             final_vocab_size=2048,
-            milestone_op="none",
         )
         tok.train(df)
 
@@ -37,7 +36,6 @@ class TestBPEVocabSize:
             num_seq="factored",
             n_bins=5,
             final_vocab_size=10,  # way too small for special tokens
-            milestone_op="none",
         )
         tok.train(df)
 
@@ -64,7 +62,6 @@ class TestBPEVocabSize:
             num_seq="factored",
             n_bins=5,
             final_vocab_size=4096,  # will be overridden
-            milestone_op="none",
         )
         tok.train(df)
 
@@ -83,13 +80,13 @@ class TestBPEVocabSize:
             num_seq="factored",
             n_bins=5,
             final_vocab_size=512,
-            milestone_op="week",
+            milestone_per_state={"default": "week"},
         )
         tok.train(df)
 
         # Core special tokens must be present
         for special in ["<|sos|>", "<|eos|>", "<|pad|>", "<|NUM|>",
-                        "<|delta_time_ip|>", "<|delta_time_op|>"]:
+                        "<|delta_time_0|>"]:
             assert special in tok.vocab, f"Missing special token: {special}"
 
         # Q-bin tokens
@@ -110,7 +107,6 @@ class TestBPEVocabSize:
             num_seq="factored",
             n_bins=5,
             final_vocab_size=512,
-            milestone_op="none",
         )
         tok.train(df)
 

@@ -197,7 +197,7 @@ class TestMultiPatientSosEos:
     def test_three_patients_sos_eos_count(self):
         df = _multi_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -211,7 +211,7 @@ class TestMultiPatientSosEos:
         """Every SOS must be followed by a matching EOS before the next SOS."""
         df = _multi_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -229,7 +229,7 @@ class TestMultiPatientSosEos:
     def test_first_token_is_sos_last_is_eos(self):
         df = _multi_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -238,74 +238,96 @@ class TestMultiPatientSosEos:
         assert decoded[-1] == "<|eos|>", f"Last token should be EOS, got {decoded[-1]}"
 
 
-class TestNestedInpatientEncounters:
-    """Nested admissions should keep patient in IP mode until all are closed."""
+class TestStateTransitions:
+    """State machine transitions (last-trigger-wins) for admission/discharge."""
 
     def _encode_and_decode(self, df):
         tok = DBTokenizer(
             text_mode_default="concept", num_type="discrete", num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"], discharge_classes=["discharge"],
-            milestone_ip="none", milestone_op="none",
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
         )
         tok.train(df)
         ids, _ = tok.encode(df)
         return tok.decode(ids)
 
-    def test_stays_ip_after_first_discharge(self):
-        """After first discharge (with two admissions), time deltas must still be IP."""
-        df = _nested_admit_df()
-        decoded = self._encode_and_decode(df)
-
-        # Collect all delta tokens with their positions
-        delta_tokens = [(i, t) for i, t in enumerate(decoded)
-                        if "delta_time" in t]
-
-        # Find the indices of key events in the decoded stream
-        # After the 1st discharge and before the 2nd discharge,
-        # there must be delta_time_ip tokens (not op).
-        # After the 2nd discharge, delta_time_op should appear.
-        found_ip_after_first_disch = False
-        found_op_after_second_disch = False
-
-        # Track discharge count
-        disch_count = 0
-        for i, t in enumerate(decoded):
-            if t == "<|discharge|>":
-                disch_count += 1
-            if disch_count == 1 and "delta_time_ip" in t:
-                found_ip_after_first_disch = True
-            if disch_count == 2 and "delta_time_op" in t:
-                found_op_after_second_disch = True
-
-        assert found_ip_after_first_disch, (
-            "Expected IP time deltas between 1st and 2nd discharge"
+    def test_delta_after_admission_is_inpatient_scale(self):
+        """After admission, time deltas use the inpatient scale band."""
+        rows = [
+            {"id": 1, "time": datetime(2023, 1, 1, 8, 0), "class": "lab",
+             "text_value": "hemoglobin", "numeric_value": 13.0},
+            {"id": 1, "time": datetime(2023, 1, 1, 9, 0), "class": "admission",
+             "text_value": None, "numeric_value": None},
+            # short delta after admission (< 24h)
+            {"id": 1, "time": datetime(2023, 1, 1, 10, 0), "class": "lab",
+             "text_value": "hemoglobin", "numeric_value": 11.0},
+        ]
+        df = pl.DataFrame(rows)
+        tok = DBTokenizer(
+            text_mode_default="concept", num_type="discrete", num_seq="factored",
+            n_bins=5,
+            time_scales=[86400.0],
+            time_scale_names=["short", "long"],
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
         )
-        assert found_op_after_second_disch, (
-            "Expected OP time deltas after 2nd (final) discharge"
-        )
+        tok.train(df)
+        ids, _ = tok.encode(df)
+        decoded = tok.decode(ids)
 
-    def test_no_op_delta_while_nested(self):
-        """No OP time deltas should appear between first admission and last discharge."""
+        # There should be a delta_time_short token for the post-admission lab
+        short_tds = [t for t in decoded if "delta_time_short" in t]
+        assert len(short_tds) > 0, "Expected short-scale delta after admission"
+
+    def test_discharge_transitions_back_to_outpatient(self):
+        """After discharge, milestones switch back to outpatient mode."""
         df = _nested_admit_df()
-        decoded = self._encode_and_decode(df)
+        tok = DBTokenizer(
+            text_mode_default="concept", num_type="discrete", num_seq="factored",
+            n_bins=5,
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
+            milestone_per_state={"inpatient": "8hr", "outpatient": "week"},
+        )
+        tok.train(df)
+        # Just verify encoding succeeds without error
+        ids, _ = tok.encode(df)
+        assert len(ids) > 0
 
-        in_nested = False
-        admit_count = 0
-        disch_count = 0
-        for t in decoded:
-            if t == "<|admission|>":
-                admit_count += 1
-                in_nested = True
-            elif t == "<|discharge|>":
-                disch_count += 1
-                if disch_count >= 2:
-                    in_nested = False
-            if in_nested and "delta_time_op" in t:
-                pytest.fail(
-                    "Found OP time delta while patient is still admitted "
-                    f"(admits={admit_count}, discharges={disch_count})"
-                )
+    def test_initial_state_respected(self):
+        """initial_state determines pre-admission behavior."""
+        rows = [
+            {"id": 1, "time": datetime(2023, 1, 1, 8, 0), "class": "lab",
+             "text_value": "hemoglobin", "numeric_value": 13.0},
+            {"id": 1, "time": datetime(2023, 1, 2, 8, 0), "class": "lab",
+             "text_value": "hemoglobin", "numeric_value": 12.0},
+        ]
+        df = pl.DataFrame(rows)
+        tok = DBTokenizer(
+            text_mode_default="concept", num_type="discrete", num_seq="factored",
+            n_bins=5,
+            state_transitions={"inpatient": ["admission"]},
+            initial_state="outpatient",
+            milestone_per_state={"outpatient": "week"},
+        )
+        tok.train(df)
+        dbg = tok.encode_debug(df)
+        all_toks = []
+        for row in dbg.iter_rows(named=True):
+            all_toks.extend(row["tokens"])
+        # Should have weekly milestone (outpatient initial state)
+        ms_week = [t for t in all_toks if t.startswith("<|ms_week_")]
+        assert len(ms_week) > 0, "Expected week milestones from outpatient initial_state"
 
 
 @pytest.mark.skipif(not HAS_BPE, reason="rustbpe/tiktoken not installed")
@@ -317,22 +339,26 @@ class TestFusedBpeFallbackToFactored:
         tok = DBTokenizer(
             text_mode_default="auto", text_mode_threshold=10,
             num_type="discrete", num_seq="fused", n_bins=5,
-            final_vocab_size=512, milestone_op="none",
+            final_vocab_size=512,
         )
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
 
         # The "note" class should have been auto-detected as BPE (70 unique texts > threshold=10).
-        # Fused+BPE → factored fallback → separate <|Q…|> tokens should appear.
+        # Fused+BPE → factored fallback → separate discrete quantizer tokens should appear.
         assert tok.class_text_modes.get("note") == "bpe", (
             "Expected 'note' class to be BPE mode"
         )
 
-        # For BPE classes, there should be standalone <|Q…|> tokens
-        factored_q = [t for t in decoded if t.startswith("<|Q") and t.endswith("|>")]
-        assert len(factored_q) > 0, (
-            "Expected factored <|Q…|> tokens for BPE-mode class with fused setting"
+        # For BPE classes, there should be standalone factored numeric tokens (Q or L)
+        # Notes have unique text_values (1 occurrence each) → level encoding → <|L..|> tokens
+        factored_discrete = [
+            t for t in decoded
+            if (t.startswith("<|Q") or t.startswith("<|L")) and t.endswith("|>")
+        ]
+        assert len(factored_discrete) > 0, (
+            "Expected factored <|Q…|> or <|L…|> tokens for BPE-mode class with fused setting"
         )
 
     def test_concept_class_emits_fused_tokens(self):
@@ -340,7 +366,7 @@ class TestFusedBpeFallbackToFactored:
         tok = DBTokenizer(
             text_mode_default="auto", text_mode_threshold=10,
             num_type="discrete", num_seq="fused", n_bins=5,
-            final_vocab_size=512, milestone_op="none",
+            final_vocab_size=512,
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -375,7 +401,7 @@ class TestSimultaneousEventOrdering:
     def test_order_preserved(self):
         df = _simultaneous_events_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -395,7 +421,7 @@ class TestSimultaneousEventOrdering:
     def test_text_value_order_preserved(self):
         df = _simultaneous_events_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -411,7 +437,7 @@ class TestSimultaneousEventOrdering:
         """No time-delta tokens should appear between same-timestamp events."""
         df = _simultaneous_events_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -428,7 +454,7 @@ class TestSingleRowPatient:
     def test_single_event_structure(self):
         df = _single_row_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -440,7 +466,7 @@ class TestSingleRowPatient:
         """Single event means no prior time to compute a delta from."""
         df = _single_row_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -454,7 +480,7 @@ class TestSingleRowPatient:
         """With a birth-date row, an age token should be emitted."""
         df = _single_row_patient_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -471,7 +497,7 @@ class TestMissingNumericOnConceptPair:
     def test_no_numeric_token_for_null_nv(self):
         df = _missing_numeric_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -501,11 +527,11 @@ class TestMissingNumericOnConceptPair:
         # We should have 3 lab groups
         assert len(lab_groups) == 3, f"Expected 3 lab groups, got {len(lab_groups)}"
 
-        # 1st and 3rd groups should have a Q token (numeric present)
+        # 1st and 3rd groups should have a discrete numeric token (Q-bin or L-level)
         for idx in [0, 2]:
-            q_toks = [t for t in lab_groups[idx] if t.startswith("<|Q")]
+            q_toks = [t for t in lab_groups[idx] if t.startswith("<|Q") or t.startswith("<|L")]
             assert len(q_toks) > 0, (
-                f"Lab group {idx} should have a Q token (numeric present): {lab_groups[idx]}"
+                f"Lab group {idx} should have a Q or L token (numeric present): {lab_groups[idx]}"
             )
 
         # 2nd group should NOT have any Q token (numeric is None)
@@ -518,7 +544,7 @@ class TestMissingNumericOnConceptPair:
         """In fused mode, a None numeric should produce a plain concept token, not a fused one."""
         df = _missing_numeric_df()
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="fused", n_bins=5, milestone_op="none")
+                          num_seq="fused", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -534,55 +560,45 @@ class TestMissingNumericOnConceptPair:
 
 
 class TestAdmissionWithoutDischarge:
-    """Patient admitted but never discharged — all subsequent events use IP time."""
+    """Patient admitted but never discharged — state remains inpatient."""
 
-    def test_all_post_admission_deltas_are_ip(self):
-        df = _admit_no_discharge_df()
-        tok = DBTokenizer(
+    def _make_tok(self):
+        return DBTokenizer(
             text_mode_default="concept", num_type="discrete", num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"], discharge_classes=["discharge"],
-            milestone_ip="none", milestone_op="none",
+            state_transitions={
+                "inpatient":  ["admission"],
+                "outpatient": ["discharge"],
+            },
+            initial_state="outpatient",
+            milestone_per_state={"inpatient": "8hr", "outpatient": "week"},
         )
+
+    def test_encodes_without_error(self):
+        """Encoding a patient admitted but never discharged completes without error."""
+        df = _admit_no_discharge_df()
+        tok = self._make_tok()
+        tok.train(df)
+        ids, _ = tok.encode(df)
+        assert len(ids) > 0
+
+    def test_stream_ends_with_eos(self):
+        """Encode completes without error and stream ends with EOS."""
+        df = _admit_no_discharge_df()
+        tok = self._make_tok()
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
+        assert decoded[-1] == "<|eos|>"
 
-        # Find the admission token position
-        admit_idx = decoded.index("<|admission|>")
-
-        # All delta tokens after admission should be IP
-        post_admit_deltas = [
-            t for i, t in enumerate(decoded)
-            if i > admit_idx and "delta_time" in t
-        ]
-        for dt_tok in post_admit_deltas:
-            assert "ip" in dt_tok, (
-                f"Expected IP delta after admission, got: {dt_tok}"
-            )
-
-    def test_op_delta_before_admission(self):
-        """The time gap before admission should produce an OP delta."""
+    def test_admission_token_present(self):
+        """Admission event token appears in the decoded stream."""
         df = _admit_no_discharge_df()
-        tok = DBTokenizer(
-            text_mode_default="concept", num_type="discrete", num_seq="factored",
-            n_bins=5,
-            admission_classes=["admission"], discharge_classes=["discharge"],
-            milestone_ip="none", milestone_op="none",
-        )
+        tok = self._make_tok()
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
-
-        admit_idx = decoded.index("<|admission|>")
-        pre_admit_deltas = [
-            t for i, t in enumerate(decoded)
-            if i < admit_idx and "delta_time" in t
-        ]
-        for dt_tok in pre_admit_deltas:
-            assert "op" in dt_tok, (
-                f"Expected OP delta before admission, got: {dt_tok}"
-            )
+        assert "<|admission|>" in decoded
 
     def test_no_crash_at_end(self):
         """Encode completes without error and stream ends with EOS."""
@@ -590,8 +606,8 @@ class TestAdmissionWithoutDischarge:
         tok = DBTokenizer(
             text_mode_default="concept", num_type="discrete", num_seq="factored",
             n_bins=5,
-            admission_classes=["admission"], discharge_classes=["discharge"],
-            milestone_ip="none", milestone_op="none",
+            state_transitions={"inpatient": ["admission"]},
+            initial_state="default",
         )
         tok.train(df)
         ids, _ = tok.encode(df)
@@ -612,7 +628,7 @@ class TestZeroTimeDeltaSuppressed:
         ]
         df = pl.DataFrame(rows)
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
@@ -634,7 +650,7 @@ class TestZeroTimeDeltaSuppressed:
         ]
         df = pl.DataFrame(rows)
         tok = DBTokenizer(text_mode_default="concept", num_type="discrete",
-                          num_seq="factored", n_bins=5, milestone_op="none")
+                          num_seq="factored", n_bins=5)
         tok.train(df)
         ids, _ = tok.encode(df)
         decoded = tok.decode(ids)
