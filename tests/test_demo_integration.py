@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from datetime import datetime, timedelta
 from conftest import REF, HAS_BPE
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

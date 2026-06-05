@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from datetime import datetime, timedelta
 
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 try:
     import rustbpe

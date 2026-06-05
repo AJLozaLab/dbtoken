@@ -40,7 +40,7 @@ except ImportError:
     HAS_BPE_BACKEND = False
 
 try:
-    from distribution_utils import analyze_distributions
+    from dbtoken.distribution_utils import analyze_distributions
 except ImportError:
     analyze_distributions = None
 

@@ -10,7 +10,7 @@ from conftest import (
     assert_text_values_match, assert_numerics_finite,
     assert_level_exact, assert_time_increases, assert_patient_ids,
 )
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

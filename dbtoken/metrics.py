@@ -19,7 +19,7 @@ All bits are aggregated per *data row* (one class token per row).
 
 Usage::
 
-    from metrics import bits_per_row
+    from dbtoken.metrics import bits_per_row
     result = bits_per_row(model, tokenizer, dataloader, model_type='discrete')
 """
 

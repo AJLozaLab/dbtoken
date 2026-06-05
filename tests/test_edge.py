@@ -4,16 +4,12 @@ No fancy imports — only stdlib, polars, numpy, pytest, and DBTokenizer.
 Each test builds its own DataFrame inline.
 """
 
-import sys
-from pathlib import Path
-
 import polars as pl
 import numpy as np
 import pytest
 from datetime import datetime, timedelta
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 try:
     import rustbpe

@@ -4,7 +4,7 @@ import numpy as np
 import warnings
 import pytest
 from conftest import make_df, make_bpe_df, HAS_BPE, REF
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

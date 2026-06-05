@@ -3,7 +3,7 @@ import polars as pl
 import pytest
 from datetime import datetime, timedelta
 from conftest import make_df
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 def _all_tokens_from_debug(dbg, patient_id=None):

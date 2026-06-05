@@ -3,7 +3,7 @@ import polars as pl
 import pytest
 from datetime import datetime, timedelta
 from conftest import make_bpe_df, HAS_BPE
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 @pytest.mark.skipif(not HAS_BPE, reason="rustbpe/tiktoken not installed")

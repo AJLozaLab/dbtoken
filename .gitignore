@@ -6,3 +6,7 @@ rustbpe-master/target/
 __pycache__/
 *.zip
 *.egg-info/
+dist/
+build/
+.eggs/
+.venv/

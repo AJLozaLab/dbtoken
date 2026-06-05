@@ -3,6 +3,20 @@
 A tokenizer for long-format database and EHR tabular data, designed to convert
 structured clinical records into dense token sequences suitable for autoregressive models.
 
+## Installation
+
+```bash
+pip install dbtoken
+```
+
+Optional extras:
+
+```bash
+pip install "dbtoken[bpe]"      # BPE training (rustbpe) + inference (tiktoken)
+pip install "dbtoken[metrics]"  # bits-per-row evaluation metrics (requires PyTorch)
+pip install "dbtoken[dev]"      # development dependencies
+```
+
 ## Input Schema
 
 Every input DataFrame must have exactly five columns:
@@ -23,7 +37,7 @@ bookended by `<|sos|>` / `<|eos|>` tokens.
 ## Two-Stage Workflow
 
 ```python
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 tok = DBTokenizer(...)   # configure
 tok.train(df)            # learn vocab, numeric transforms, time-delta fits
@@ -260,11 +274,10 @@ is saved separately (tiktoken `Encoding`).
 - **rustbpe** — BPE training (optional, only for BPE text mode)
 - **tiktoken** — BPE inference (optional, only for BPE text mode)
 
-Install BPE dependencies:
+Install BPE support:
 
 ```bash
-pip install tiktoken
-# rustbpe: build from source (https://github.com/karpathy/rustbpe)
+pip install "dbtoken[bpe]"
 ```
 
 ---
@@ -285,3 +298,24 @@ pip install tiktoken
 | `load(path)` | Class method — deserialise from disk |
 | `scale(params, x)` | Apply learned scaling transform |
 | `unscale(params, x)` | Invert scaling transform |
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/AJLozaLab/dbtoken.git
+cd dbtoken
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+## Publishing to PyPI
+
+```bash
+pip install build twine
+python -m build
+twine check dist/*
+twine upload dist/*   # requires a PyPI account and API token
+```

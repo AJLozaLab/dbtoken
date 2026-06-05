@@ -4,7 +4,7 @@ import warnings
 import pytest
 from datetime import datetime, timedelta
 from conftest import make_df, make_bpe_df, HAS_BPE
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 class TestAutoTextModeResolution:

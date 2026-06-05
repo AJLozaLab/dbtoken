@@ -13,21 +13,16 @@ Minimal dataset:
     Patient 1, 12 rows of lab/hemoglobin at hourly intervals,
     numeric values 10.0–21.0 (enough distinct values to trigger quantile binning).
 """
-import sys
 import math
 import re
-from pathlib import Path
 from datetime import datetime, timedelta
 
 import polars as pl
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from tokenizer import DBTokenizer
-from metrics import (
+from dbtoken import DBTokenizer
+from dbtoken.metrics import (
     _bin_width,
     _jacobian_log_abs,
     _density_adjustment,

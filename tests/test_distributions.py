@@ -5,7 +5,7 @@ import warnings
 import pytest
 from datetime import datetime, timedelta
 from conftest import make_df, REF
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 def _df_with_negatives():

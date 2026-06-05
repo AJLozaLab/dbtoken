@@ -4,7 +4,7 @@ import os
 import tempfile
 import pytest
 from conftest import df_simple, df_bpe, REF, HAS_BPE
-from tokenizer import DBTokenizer
+from dbtoken import DBTokenizer
 
 
 def _assert_vals_equal(vals1, vals2):
