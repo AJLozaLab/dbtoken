@@ -137,19 +137,29 @@ def _bin_width(edges, bin_idx):
     """Original-scale width of quantile bin *bin_idx* given *edges*.
 
     np.digitize(x, edges, right=False) yields:
-      bin 0    : (−∞, edges[0])      — use edges[1]−edges[0] as proxy
-      bin k    : [edges[k-1], edges[k])
-      bin N    : [edges[-1], +∞)     — use edges[-1]−edges[-2] as proxy
+      bin 0    : (-inf, edges[0])    -- width = edges[0] - min_threshold
+                                        (falls back to edges[0] if no ctx)
+      bin k    : [edges[k-1], edges[k])  -- width = edges[k] - edges[k-1]
+      bin N    : [edges[-1], +inf)   -- width = max_threshold - edges[-1]
+                                        (falls back to edges[-1] - edges[-2])
 
+    If *ctx* is provided with 'min_threshold'/'max_threshold' keys,
+    exact tail widths are used. Otherwise sensible fallbacks apply.
     A minimum width of 1e-12 prevents log(0).
     """
     n = len(edges)
     if n <= 1:
-        return 1.0  # degenerate: single edge, can't compute width
+        return 1.0
     if bin_idx <= 0:
-        w = edges[1] - edges[0]
+        if ctx is not None and "min_threshold" in ctx:
+            w = edges[0] - ctx["min_threshold"]
+        else:
+            w = edges[0]  # fallback: assumes data starts at 0
     elif bin_idx >= n:
-        w = edges[-1] - edges[-2]
+        if ctx is not None and "max_threshold" in ctx:
+            w = ctx["max_threshold"] - edges[-1]
+        else:
+            w = edges[-1] - edges[-2]
     else:
         w = edges[bin_idx] - edges[bin_idx - 1]
     return max(abs(w), 1e-12)
@@ -221,7 +231,7 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
             m = _RE_Q_IDX.search(tok)
             if m and "edges" in ctx:
                 bin_idx = int(m.group(1))
-                w = _bin_width(ctx["edges"], bin_idx)
+                w = _bin_width(ctx["edges"], bin_idx, ctx)
                 adj[i] = math.log2(w)  # mass → density: +log₂(w) in bits
             continue
 
@@ -230,7 +240,7 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
             m = _RE_Q_IDX.search(tok)
             if m and "edges" in ctx:
                 bin_idx = int(m.group(1))
-                w = _bin_width(ctx["edges"], bin_idx)
+                w = _bin_width(ctx["edges"], bin_idx, ctx)
                 adj[i] = math.log2(w)
             continue
 
@@ -239,7 +249,7 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
             m = _RE_Q_IDX.search(tok)
             if m and "edges" in ctx:
                 bin_idx = int(m.group(1))
-                w = _bin_width(ctx["edges"], bin_idx)
+                w = _bin_width(ctx["edges"], bin_idx, ctx)
                 adj[i] = math.log2(w)
             continue
 
