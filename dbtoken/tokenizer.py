@@ -888,6 +888,9 @@ class DBTokenizer:
                 last_age = None
                 last_ms = None
                 current_state = self.initial_state
+                
+                if ts is not None:
+                    self._birth_dates[row["id"]] = ts 
 
                 # Emit SOS for new patient
                 ids.append(self.vocab["<|sos|>"])
@@ -1417,6 +1420,10 @@ class DBTokenizer:
                 last_age = None
                 last_ms = None
                 current_state = self.initial_state
+
+                if ts is not None:
+                    self._birth_dates[row["id"]] = ts
+                  
                 # Age will be emitted at the first real event via Kalman check
                 tokens_col.append(rt)
                 continue
