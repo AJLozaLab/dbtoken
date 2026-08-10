@@ -508,7 +508,12 @@ class DBTokenizer:
                     )
                 )
                 edges = [float(group_vals.quantile(p)) for p in p_edges]
-                self.numeric_params[key] = {"type": "bins", "edges": edges}
+                lo = float(group_vals.quantile(self.bin_clip_min / 100))
+                hi = float(group_vals.quantile(self.bin_clip_max / 100))
+                self.numeric_params[key] = {
+                    "type": "bins", "edges": edges,
+                    "min_threshold": lo, "max_threshold": hi,
+                }
                 n_bins += 1
 
             else:  # continuous scaling
@@ -654,7 +659,10 @@ class DBTokenizer:
                 np.linspace(clip_lo / 100, clip_hi / 100, self.n_bins - 1)
             )
             edges = [float(np.percentile(vals, p * 100)) for p in p_edges]
-            return {"type": "bins", "edges": edges}
+            return {
+                "type": "bins", "edges": edges,
+                "min_threshold": lo, "max_threshold": hi,
+            }
 
     # ·····  delta scale classification  ······························
 
