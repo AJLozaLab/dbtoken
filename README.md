@@ -310,12 +310,3 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
-
-## Publishing to PyPI
-
-```bash
-pip install build twine
-python -m build
-twine check dist/*
-twine upload dist/*   # requires a PyPI account and API token
-```
