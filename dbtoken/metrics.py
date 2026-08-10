@@ -389,6 +389,7 @@ def bits_per_row(
         n_rows          — total data rows (= class token count in targets)
         tokens_per_row  — average tokens per data row
     """
+    was_training = model.training
     model.eval()
 
     accum = {
@@ -465,5 +466,6 @@ def bits_per_row(
         "tokens_per_row": total_tokens / n,
     }
 
-    model.train()
+    if was_training:
+        model.train()
     return result
