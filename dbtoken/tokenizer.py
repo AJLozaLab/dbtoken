@@ -1288,7 +1288,8 @@ class DBTokenizer:
         current_cls: Optional[str] = None
         current_tv: Optional[str] = None
         pending_td_key: Optional[str] = None  # "ip" or "op"
-
+        bpe_pieces: List[str] = []
+      
         for i, (tid, ttype) in enumerate(zip(ids, types)):
             tok = self.decode_token(tid)
 
@@ -1297,15 +1298,29 @@ class DBTokenizer:
                 current_cls = tok[2:-2]  # strip <| and |>
                 current_tv = None
                 pending_td_key = None
+                bpe_pieces = []
                 continue
 
             # Track text context
             if ttype == "concept":
                 current_tv = tok
+                bpe_pieces = []
+                continue
+              
+            # Accumulate BPE subwords to reconstruct text_value
+            if ttype == "bpe":
+                bpe_pieces.append(tok)
+                accumulated = "".join(bpe_pieces)
+                ni = self.numeric_params.get((current_cls, accumulated))
+                if ni is not None:
+                    current_tv = accumulated
+                    if ni.get("type") == "scaling":
+                        out[i] = ni
                 continue
 
             # Time-delta fused: params come from time_delta_params
             if ttype == "time_delta_fused":
+                bpe_pieces = []
                 if _re_td_fuse.match(tok):
                     # Extract scale key: <|delta_time_SK_Qn|> → SK
                     inner = tok[len("<|delta_time_"):-2]   # "SK_Qn"
@@ -1317,6 +1332,7 @@ class DBTokenizer:
 
             # Time-delta marker: note the key for the next Q/NUM
             if ttype == "time_delta":
+                bpe_pieces = []
                 m = _re_td_mrk.match(tok)
                 if m:
                     pending_td_key = m.group(1)
@@ -1324,6 +1340,7 @@ class DBTokenizer:
 
             # Q or NUM following a time-delta marker
             if ttype in ("Q", "num_marker") and pending_td_key is not None:
+                bpe_pieces = []
                 td = self.time_delta_params.get(pending_td_key)
                 if td is not None:
                     out[i] = {**td, "_is_time_delta": True}
@@ -1332,11 +1349,13 @@ class DBTokenizer:
 
             # Row-level Q, L, num_marker
             if ttype in ("Q", "L", "num_marker"):
+                bpe_pieces = []
                 out[i] = self.numeric_params.get((current_cls, current_tv))
                 continue
 
             # Fused concept tokens
             if ttype in ("fused_concept_Q", "fused_concept_L"):
+                bpe_pieces = []
                 tv_part = tok.rsplit("::", 1)[0]
                 out[i] = self.numeric_params.get((current_cls, tv_part))
                 current_tv = tv_part
