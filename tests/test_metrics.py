@@ -512,7 +512,13 @@ class TestDensityAdjustmentIntegration:
 
         for i, (ttype, a) in enumerate(zip(types, adj)):
             if ttype == "Q":
-                assert a != 0.0, f"Q at pos {i} should have nonzero adj"
+                ctx = contexts[i]
+                # Identical time-deltas produce no unique edges; a single
+                # degenerate bin has width 1 and density adj 0.
+                if ctx is not None and len(ctx.get("edges") or []) == 0:
+                    assert a == 0.0, f"degenerate Q at pos {i} should have 0 adj"
+                else:
+                    assert a != 0.0, f"Q at pos {i} should have nonzero adj"
             elif ttype not in ("time_delta_fused", "fused_concept_Q"):
                 assert a == 0.0, f"{ttype} at pos {i} should have 0 adj, got {a}"
 
@@ -548,7 +554,7 @@ class TestDensityAdjustmentIntegration:
             if ttype == "Q" and ctx and not _is_time_delta_ctx(ctx):
                 tok = discrete_tok.decode_token(ids[i])
                 bin_idx = int(re.search(r"Q(\d+)", tok).group(1))
-                w = _bin_width(ctx["edges"], bin_idx)
+                w = _bin_width(ctx["edges"], bin_idx, ctx)
                 assert adj[i] == pytest.approx(math.log2(w), abs=1e-12), (
                     f"pos {i} ({tok}): adj={adj[i]:.10f}, "
                     f"expected log₂({w})={math.log2(w):.10f}"

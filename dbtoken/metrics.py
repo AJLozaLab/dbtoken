@@ -133,7 +133,7 @@ def _per_token_bits_continuous(model, xi, xv, yi, yv):
 # Density adjustment
 # ──────────────────────────────────────────────────────────────────────────
 
-def _bin_width(edges, bin_idx):
+def _bin_width(edges, bin_idx, ctx=None):
     """Original-scale width of quantile bin *bin_idx* given *edges*.
 
     np.digitize(x, edges, right=False) yields:
