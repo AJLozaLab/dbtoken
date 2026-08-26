@@ -840,9 +840,19 @@ class DBTokenizer:
     def encode(
         self,
         df: pl.DataFrame,
+        return_row_idx: bool = False,
     ) -> Tuple[List[int], Optional[List[float]]]:
         """
         Encode a DataFrame into token sequences.
+
+        Parameters
+        ----------
+        return_row_idx : bool
+            When True, also return ``row_idx`` — an int64 array parallel to
+            ``ids`` giving the index of the source row (into the *sorted*
+            frame, i.e. ``df.sort(["id", "time"])``) that emitted each token.
+            ``<|sos|>`` and ``<|eos|>`` are patient-boundary markers with no
+            source row and carry ``-1``.
 
         Returns
         -------
@@ -851,6 +861,8 @@ class DBTokenizer:
         vals : list[float] | None
             Parallel float values when num_type='continuous' (NaN for
             non-numeric positions); ``None`` for discrete mode.
+        row_idx : np.ndarray, optional
+            Only present when ``return_row_idx=True``.
         """
         if not self._trained:
             raise RuntimeError("Call train() before encode().")
@@ -862,6 +874,10 @@ class DBTokenizer:
 
         ids: List[int] = []
         vals: Optional[List[float]] = [] if self.num_type == "continuous" else None
+        # len(ids) at the start of every row's emission, plus a final sentinel.
+        # Only ever appended to at the top of the row loop, so it stays correct
+        # regardless of which branches below fire.
+        row_starts: List[int] = []
 
         last_id = None
         last_age: Optional[int] = None
@@ -870,6 +886,7 @@ class DBTokenizer:
         last_ms = None    # last milestone boundary key
 
         for row in df_e.iter_rows(named=True):
+            row_starts.append(len(ids))
             cls   = row["class"]
             tv    = row["text_value"]
             nv    = row["numeric_value"]
@@ -1013,7 +1030,22 @@ class DBTokenizer:
             if vals is not None:
                 vals.append(float("nan"))
 
-        return ids, vals
+        if not return_row_idx:
+            return ids, vals
+
+        # Expand the per-row spans. A patient-boundary <|eos|> is emitted while
+        # processing the *next* patient's first row, so span expansion assigns
+        # it to that row — but both boundary markers are overwritten with -1
+        # below, so the mis-attribution never escapes.
+        row_starts.append(len(ids))
+        row_idx = np.repeat(
+            np.arange(len(row_starts) - 1, dtype=np.int64),
+            np.diff(row_starts),
+        )
+        id_arr = np.asarray(ids, dtype=np.int64)
+        boundary = (id_arr == self.vocab["<|sos|>"]) | (id_arr == self.vocab["<|eos|>"])
+        row_idx[boundary] = -1
+        return ids, vals, row_idx
 
     # ·····  emit helpers  ·············································
 
