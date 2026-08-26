@@ -103,6 +103,13 @@ values, each value maps to a categorical token `<|L0|>` … `<|Ln|>`.
 For higher-cardinality numeric groups, quantile-based bins produce tokens
 `<|Q0|>` … `<|Q{n_bins}|>`.
 
+Equal-mass percentile edges collapse when values cluster (a point mass larger
+than `1 / n_bins` makes several edges land on the same number). Training snaps
+each cut onto a gap between consecutive unique values, then reallocates leftover
+cuts by splitting the heaviest remaining bin. The result is as many strictly
+increasing edges as the data can support, up to `n_bins - 1`. Time-delta bins
+use the same procedure.
+
 ### Continuous Scaling
 
 Distribution-aware scaling (normal, lognormal, gamma, minmax) transforms each

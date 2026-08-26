@@ -112,6 +112,108 @@ def _fit_params(distribution: str, vals: np.ndarray) -> dict:
     return _FIT_PARAM_FUNCS[distribution](vals)
 
 
+def _adaptive_quantile_edges(
+    vals: np.ndarray,
+    n_bins: int,
+    clip_min: float = 1.0,
+    clip_max: float = 99.0,
+) -> List[float]:
+    """Strictly increasing bin edges, reallocating collapsed quantile cuts.
+
+    Equal-mass percentile edges duplicate when a value has mass > 1/K.
+    This keeps those quantile cuts as the starting point, snaps each onto a
+    gap between consecutive unique values, then spends leftover cut budget
+    by repeatedly splitting the heaviest remaining bin at its most even-mass
+    unique-value gap.
+
+    Returns ``min(n_bins - 1, n_unique_in_clip - 1)`` strictly increasing
+    midpoints suitable for ``np.digitize(..., right=False)``.
+    """
+    x = np.asarray(vals, dtype=float)
+    x = x[np.isfinite(x)]
+    n_edges = n_bins - 1
+    if n_edges <= 0 or x.size == 0:
+        return []
+
+    lo = float(np.percentile(x, clip_min))
+    hi = float(np.percentile(x, clip_max))
+    xc = x[(x >= lo) & (x <= hi)]
+    if xc.size == 0:
+        xc = x
+
+    uniques, counts = np.unique(xc, return_counts=True)
+    n_unique = len(uniques)
+    if n_unique <= 1:
+        return []
+
+    n_want = min(n_edges, n_unique - 1)
+    mass = counts.astype(float)
+    q_edges = np.quantile(x, np.linspace(clip_min / 100.0, clip_max / 100.0, n_edges))
+
+    chosen: set = set()
+    last_gap = n_unique - 2
+    for edge in q_edges:
+        idx = int(np.searchsorted(uniques, edge, side="left"))
+        if idx >= n_unique:
+            gap = last_gap
+        elif idx < n_unique - 1:
+            # Cut after this unique so a point-mass stays in one lower bin.
+            gap = idx
+        else:
+            gap = last_gap
+        chosen.add(int(np.clip(gap, 0, last_gap)))
+
+    if len(chosen) > n_want:
+        chosen = set(sorted(chosen)[:n_want])
+
+    def _bins_from_gaps(gaps):
+        start = 0
+        bins = []
+        for gap in sorted(gaps):
+            bins.append((start, gap))
+            start = gap + 1
+        bins.append((start, n_unique - 1))
+        return bins
+
+    def _even_split(start, end):
+        if end <= start:
+            return None
+        total = mass[start:end + 1].sum()
+        left = 0.0
+        best_i, best_score = None, np.inf
+        for i in range(start, end):
+            left += mass[i]
+            score = abs(left - (total - left))
+            if score < best_score:
+                best_score = score
+                best_i = i
+        return best_i
+
+    while len(chosen) < n_want:
+        candidates = [
+            (mass[s:e + 1].sum(), s, e)
+            for s, e in _bins_from_gaps(chosen)
+            if e > s
+        ]
+        if not candidates:
+            break
+        candidates.sort(reverse=True)
+        placed = False
+        for _, start, end in candidates:
+            gap = _even_split(start, end)
+            if gap is not None and gap not in chosen:
+                chosen.add(gap)
+                placed = True
+                break
+        if not placed:
+            break
+
+    return [
+        (float(uniques[i]) + float(uniques[i + 1])) / 2.0
+        for i in sorted(chosen)
+    ]
+
+
 def _milestone_marker(kind: str, ts: datetime, shift_start: int) -> Optional[str]:
     """Return the milestone-position token string for *ts* under *kind*.
 
@@ -499,17 +601,15 @@ class DBTokenizer:
                     .filter((pl.col("class") == row["class"]) & tv_filter)
                     .select("numeric_value")
                     .to_series()
+                    .to_numpy()
+                    .astype(float)
                 )
-                p_edges = list(
-                    np.linspace(
-                        self.bin_clip_min / 100,
-                        self.bin_clip_max / 100,
-                        self.n_bins - 1,
-                    )
+                edges = _adaptive_quantile_edges(
+                    group_vals, self.n_bins,
+                    self.bin_clip_min, self.bin_clip_max,
                 )
-                edges = [float(group_vals.quantile(p)) for p in p_edges]
-                lo = float(group_vals.quantile(self.bin_clip_min / 100))
-                hi = float(group_vals.quantile(self.bin_clip_max / 100))
+                lo = float(np.percentile(group_vals, self.bin_clip_min))
+                hi = float(np.percentile(group_vals, self.bin_clip_max))
                 self.numeric_params[key] = {
                     "type": "bins", "edges": edges,
                     "min_threshold": lo, "max_threshold": hi,
@@ -655,10 +755,9 @@ class DBTokenizer:
                 **params,
             }
         else:
-            p_edges = list(
-                np.linspace(clip_lo / 100, clip_hi / 100, self.n_bins - 1)
+            edges = _adaptive_quantile_edges(
+                vals, self.n_bins, clip_lo, clip_hi,
             )
-            edges = [float(np.percentile(vals, p * 100)) for p in p_edges]
             return {
                 "type": "bins", "edges": edges,
                 "min_threshold": lo, "max_threshold": hi,
