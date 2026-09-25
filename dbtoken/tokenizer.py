@@ -5,6 +5,7 @@ Tokenizes tables with schema: id, time, class, text_value, numeric_value
 
 Supports:
   - Per-class (or per-(class, text_value)) text tokenization: BPE or concept
+  - Per-class delimiter or fixed-width splitting into concept tokens
   - Numeric tokenization: discrete (quantile bins), continuous (distribution
     scaling), or categorical levels (≤ threshold distinct values → L tokens)
   - Fused or factored numeric sequence placement (fused auto-enforced only
@@ -25,7 +26,7 @@ import numpy as np
 import math
 import json
 import warnings
-from typing import Optional, Dict, List, Tuple, Any, Union
+from typing import Optional, Dict, List, Tuple, Any, Union, Sequence
 from pathlib import Path
 from datetime import datetime
 
@@ -289,6 +290,9 @@ class DBTokenizer:
         #     str  key → per-class:          {'lab': 'concept'}
         #     tuple key → per-(class,tv):    {('lab','hemoglobin'): 'concept'}
         text_mode_threshold: int = 64,
+        concept_splitters: Optional[
+            Dict[str, Union[str, Sequence[Optional[int]]]]
+        ] = None,
         # --- numeric tokenization ---
         num_type: str = "discrete",               # 'discrete' or 'continuous'
         num_seq: str = "factored",                # 'fused' or 'factored'
@@ -328,6 +332,7 @@ class DBTokenizer:
             raise ValueError(f"num_type must be 'discrete'|'continuous', got '{num_type}'")
         if num_seq not in ("fused", "factored"):
             raise ValueError(f"num_seq must be 'fused'|'factored', got '{num_seq}'")
+        normalized_splitters = self._normalize_concept_splitters(concept_splitters)
         # Validate time_scales / time_scale_names
         if time_scales is not None:
             if sorted(time_scales) != list(time_scales):
@@ -354,6 +359,7 @@ class DBTokenizer:
         self.text_mode_default = text_mode_default
         self.text_mode_overrides: Dict = text_mode_overrides or {}
         self.text_mode_threshold = text_mode_threshold
+        self.concept_splitters = normalized_splitters
         self.num_type = num_type
         self.num_seq = num_seq
         self.n_bins = n_bins
@@ -387,6 +393,7 @@ class DBTokenizer:
         self._dist_recommendations: Dict[str, str] = {}
         self._trained: bool = False
         self._birth_dates: Dict = {}   # id → datetime, extracted from data
+        self._concept_split_cache: Dict[Tuple[str, str], Tuple[str, ...]] = {}
 
     # ─── Schema validation ────────────────────────────────────────────────
 
@@ -396,6 +403,88 @@ class DBTokenizer:
         missing = required - set(df.columns)
         if missing:
             raise ValueError(f"DataFrame missing required columns: {missing}")
+
+    @staticmethod
+    def _normalize_concept_splitters(
+        concept_splitters: Optional[
+            Dict[str, Union[str, Sequence[Optional[int]]]]
+        ],
+    ) -> Dict[str, Union[str, Tuple[Optional[int], ...]]]:
+        """Validate and normalize per-class concept splitting rules."""
+        if concept_splitters is None:
+            return {}
+        if not isinstance(concept_splitters, dict):
+            raise TypeError("concept_splitters must be a dict keyed by class")
+
+        normalized: Dict[str, Union[str, Tuple[Optional[int], ...]]] = {}
+        for cls, spec in concept_splitters.items():
+            if not isinstance(cls, str):
+                raise TypeError("concept_splitters keys must be class strings")
+            if isinstance(spec, str):
+                if not spec:
+                    raise ValueError(
+                        f"concept_splitters[{cls!r}] delimiter must be non-empty"
+                    )
+                normalized[cls] = spec
+                continue
+
+            if not isinstance(spec, Sequence) or isinstance(spec, (str, bytes)):
+                raise TypeError(
+                    f"concept_splitters[{cls!r}] must be a delimiter string "
+                    "or a width sequence"
+                )
+            widths = tuple(spec)
+            if len(widths) < 2 or widths[-1] is not None:
+                raise ValueError(
+                    f"concept_splitters[{cls!r}] width sequence must contain "
+                    "positive integers followed by a terminal None"
+                )
+            if any(
+                isinstance(width, bool)
+                or not isinstance(width, int)
+                or width <= 0
+                for width in widths[:-1]
+            ) or any(width is None for width in widths[:-1]):
+                raise ValueError(
+                    f"concept_splitters[{cls!r}] width sequence must contain "
+                    "positive integers followed by a terminal None"
+                )
+            normalized[cls] = widths
+        return normalized
+
+    def _split_concept(self, cls: str, text_value: str) -> Tuple[str, ...]:
+        """Return the deterministic concept pieces for ``text_value``."""
+        key = (cls, text_value)
+        cached = self._concept_split_cache.get(key)
+        if cached is not None:
+            return cached
+
+        spec = self.concept_splitters.get(cls)
+        if spec is None:
+            parts = (text_value,)
+        elif isinstance(spec, str):
+            parts = tuple(text_value.split(spec))
+        else:
+            parts_list: List[str] = []
+            start = 0
+            for width in spec[:-1]:
+                end = start + width
+                parts_list.append(text_value[start:end])
+                start = end
+            parts_list.append(text_value[start:])
+            parts = tuple(parts_list)
+
+        self._concept_split_cache[key] = parts
+        return parts
+
+    def _join_concept_parts(self, cls: Optional[str], parts: List[str]) -> Optional[str]:
+        """Reconstruct a concept text value from its emitted pieces."""
+        if not parts:
+            return None
+        spec = self.concept_splitters.get(cls) if cls is not None else None
+        if isinstance(spec, str):
+            return spec.join(parts)
+        return "".join(parts)
 
     # ──────────────────────────────────────────────────────────────────────
     # Training
@@ -480,6 +569,11 @@ class DBTokenizer:
             cls = row["class"]
             if cls in class_overrides:
                 mode = class_overrides[cls]
+            elif cls in self.concept_splitters:
+                # A splitter is an explicit request for prescribed concept
+                # boundaries and therefore takes precedence over auto/default
+                # class selection. Explicit mode overrides above still win.
+                mode = "concept"
             elif self.text_mode_default in ("bpe", "concept"):
                 mode = self.text_mode_default
             else:  # auto
@@ -524,6 +618,11 @@ class DBTokenizer:
 
     def _train_numeric(self, df: pl.DataFrame):
         """Learn numeric transforms per (class, text_value) group."""
+        # Polars infers an all-None column as Null, for which is_nan is not
+        # defined. Treat it as the no-numeric-values case directly.
+        if df.schema.get("numeric_value") == pl.Null:
+            print("  No numeric values found.")
+            return
         num_df = df.filter(
             pl.col("numeric_value").is_not_null()
             & (~pl.col("numeric_value").is_nan())
@@ -848,7 +947,7 @@ class DBTokenizer:
                 continue
             mode = self._get_text_mode(cls, tv)
             if mode == "concept":
-                concept_text_vals.add(tv)
+                concept_text_vals.update(self._split_concept(cls, tv))
         concept_tokens.extend(concept_text_vals)
 
         # Fused concept+numeric tokens
@@ -860,12 +959,13 @@ class DBTokenizer:
                 mode = self._get_text_mode(cls, tv)
                 if mode != "concept":
                     continue
+                final_piece = self._split_concept(cls, tv)[-1]
                 if params["type"] == "level":
                     for i in range(len(params["values"])):
-                        concept_tokens.append(f"{tv}::L{i}")
+                        concept_tokens.append(f"{final_piece}::L{i}")
                 elif params["type"] == "bins":
                     for i in range(self.n_bins + 1):
-                        concept_tokens.append(f"{tv}::Q{i}")
+                        concept_tokens.append(f"{final_piece}::Q{i}")
 
         # Deduplicate preserving order
         all_special = list(dict.fromkeys(special + concept_tokens))
@@ -1104,12 +1204,15 @@ class DBTokenizer:
             # ── Text tokens ───────────────────────────────────────────
             if tv is not None:
                 if text_mode == "concept":
+                    concept_parts = self._split_concept(cls, tv)
                     if eff_seq == "fused" and has_num and num_info is not None:
-                        self._emit_fused_concept(ids, vals, tv, nv, num_info)
+                        self._emit_fused_concept(
+                            ids, vals, concept_parts, nv, num_info
+                        )
                     else:
-                        ids.append(self._tok_id(tv))
+                        ids.extend(self._tok_id(part) for part in concept_parts)
                         if vals is not None:
-                            vals.append(float("nan"))
+                            vals.extend([float("nan")] * len(concept_parts))
                 else:
                     # BPE
                     cache_idx = row["_bpe_cache_idx"]
@@ -1184,21 +1287,27 @@ class DBTokenizer:
 
     def _emit_fused_concept(
         self, ids: list, vals: Optional[list],
-        tv: str, nv: float, ni: dict,
+        parts: Sequence[str], nv: float, ni: dict,
     ):
-        """Emit a fused concept+numeric token."""
+        """Emit concept pieces with the numeric payload on the final piece."""
+        for part in parts[:-1]:
+            ids.append(self._tok_id(part))
+            if vals is not None:
+                vals.append(float("nan"))
+
+        final_piece = parts[-1]
         if ni["type"] == "level":
             idx = self._level_idx(ni, nv)
-            ids.append(self._tok_id(f"{tv}::L{idx}"))
+            ids.append(self._tok_id(f"{final_piece}::L{idx}"))
             if vals is not None:
                 vals.append(float("nan"))
         elif ni["type"] == "bins":
             bi = int(np.digitize(nv, ni["edges"], right=False))
-            ids.append(self._tok_id(f"{tv}::Q{bi}"))
+            ids.append(self._tok_id(f"{final_piece}::Q{bi}"))
             if vals is not None:
                 vals.append(float("nan"))
         elif ni["type"] == "scaling":
-            ids.append(self._tok_id(tv))
+            ids.append(self._tok_id(final_piece))
             if vals is not None:
                 vals.append(self.scale(ni, nv))
 
@@ -1430,6 +1539,7 @@ class DBTokenizer:
         current_cls: Optional[str] = None
         current_tv: Optional[str] = None
         pending_td_key: Optional[str] = None  # "ip" or "op"
+        concept_pieces: List[str] = []
         bpe_pieces: List[str] = []
       
         for i, (tid, ttype) in enumerate(zip(ids, types)):
@@ -1440,17 +1550,23 @@ class DBTokenizer:
                 current_cls = tok[2:-2]  # strip <| and |>
                 current_tv = None
                 pending_td_key = None
+                concept_pieces = []
                 bpe_pieces = []
                 continue
 
             # Track text context
             if ttype == "concept":
-                current_tv = tok
+                concept_pieces.append(tok)
+                current_tv = self._join_concept_parts(current_cls, concept_pieces)
                 bpe_pieces = []
+                ni = self.numeric_params.get((current_cls, current_tv))
+                if ni is not None and ni.get("type") == "scaling":
+                    out[i] = ni
                 continue
               
             # Accumulate BPE subwords to reconstruct text_value
             if ttype == "bpe":
+                concept_pieces = []
                 bpe_pieces.append(tok)
                 accumulated = "".join(bpe_pieces)
                 ni = self.numeric_params.get((current_cls, accumulated))
@@ -1462,6 +1578,7 @@ class DBTokenizer:
 
             # Time-delta fused: params come from time_delta_params
             if ttype == "time_delta_fused":
+                concept_pieces = []
                 bpe_pieces = []
                 if _re_td_fuse.match(tok):
                     # Extract scale key: <|delta_time_SK_Qn|> → SK
@@ -1474,6 +1591,7 @@ class DBTokenizer:
 
             # Time-delta marker: note the key for the next Q/NUM
             if ttype == "time_delta":
+                concept_pieces = []
                 bpe_pieces = []
                 m = _re_td_mrk.match(tok)
                 if m:
@@ -1482,6 +1600,7 @@ class DBTokenizer:
 
             # Q or NUM following a time-delta marker
             if ttype in ("Q", "num_marker") and pending_td_key is not None:
+                concept_pieces = []
                 bpe_pieces = []
                 td = self.time_delta_params.get(pending_td_key)
                 if td is not None:
@@ -1499,8 +1618,9 @@ class DBTokenizer:
             if ttype in ("fused_concept_Q", "fused_concept_L"):
                 bpe_pieces = []
                 tv_part = tok.rsplit("::", 1)[0]
-                out[i] = self.numeric_params.get((current_cls, tv_part))
-                current_tv = tv_part
+                concept_pieces.append(tv_part)
+                current_tv = self._join_concept_parts(current_cls, concept_pieces)
+                out[i] = self.numeric_params.get((current_cls, current_tv))
                 continue
 
             # Reset pending_td on anything else
@@ -1646,20 +1766,20 @@ class DBTokenizer:
 
             if tv is not None:
                 if text_mode == "concept":
+                    concept_parts = list(self._split_concept(cls, tv))
                     if eff_seq == "fused" and has_num and num_info is not None:
                         if num_info["type"] == "level":
                             idx = self._level_idx(num_info, nv)
-                            rt.append(f"{tv}::L{idx}")
+                            concept_parts[-1] = f"{concept_parts[-1]}::L{idx}"
                         elif num_info["type"] == "bins":
                             bi = int(np.digitize(
                                 nv, num_info["edges"], right=False
                             ))
-                            rt.append(f"{tv}::Q{bi}")
+                            concept_parts[-1] = f"{concept_parts[-1]}::Q{bi}"
                         elif num_info["type"] == "scaling":
                             s = self.scale(num_info, nv)
-                            rt.append(f"{tv}({s:.3f})")
-                    else:
-                        rt.append(tv)
+                            concept_parts[-1] = f"{concept_parts[-1]}({s:.3f})"
+                    rt.extend(concept_parts)
                 else:
                     cache_idx = row["_bpe_cache_idx"]
                     if cache_idx >= 0:
@@ -1745,8 +1865,9 @@ class DBTokenizer:
         * Continuous (scaling) values are approximately recovered via the
           distribution-inverse transform; unscaling is only exact for
           ``minmax`` distribution.
-        * BPE subword pieces are concatenated (no separator) to restore
-          ``text_value``.
+        * BPE subword pieces are concatenated; split concept pieces are
+          rejoined with their configured delimiter or concatenated for
+          fixed-width rules to restore ``text_value``.
         * The ``inpatient`` column is not reconstructed.
         """
         import re as _re
@@ -1808,15 +1929,24 @@ class DBTokenizer:
         # Per-row accumulators
         pending_cls: Optional[str] = None
         pending_tv_pieces: List[str] = []
+        pending_text_is_bpe: bool = False
         pending_nv: Optional[float] = None        # fully resolved numeric
         pending_scaled_val: Optional[float] = None  # fused-scaling raw val
         pending_td_key: Optional[str] = None       # factored td: waiting for Q/NUM
 
+        def _pending_text_value() -> Optional[str]:
+            if not pending_tv_pieces:
+                return None
+            if pending_text_is_bpe:
+                return "".join(pending_tv_pieces)
+            return self._join_concept_parts(pending_cls, pending_tv_pieces)
+
         def _flush() -> None:
-            nonlocal pending_cls, pending_tv_pieces, pending_nv, pending_scaled_val
+            nonlocal pending_cls, pending_tv_pieces, pending_text_is_bpe
+            nonlocal pending_nv, pending_scaled_val
             if pending_cls is None:
                 return
-            tv_str: Optional[str] = "".join(pending_tv_pieces) or None
+            tv_str = _pending_text_value()
             nv = pending_nv
             # Fused-scaling: concept token carried the scaled val in vals[i]
             if nv is None and pending_scaled_val is not None:
@@ -1832,6 +1962,7 @@ class DBTokenizer:
             })
             pending_cls = None
             pending_tv_pieces = []
+            pending_text_is_bpe = False
             pending_nv = None
             pending_scaled_val = None
 
@@ -1895,7 +2026,7 @@ class DBTokenizer:
                     pending_td_key = None
                 else:
                     # Factored row-level bin numeric
-                    tv_str = "".join(pending_tv_pieces) or None
+                    tv_str = _pending_text_value()
                     num_info = self.numeric_params.get((pending_cls, tv_str))
                     if num_info is not None and "edges" in num_info:
                         pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
@@ -1905,7 +2036,7 @@ class DBTokenizer:
             m = _re_l.match(tok)
             if m:
                 level_idx = int(m.group(1))
-                tv_str = "".join(pending_tv_pieces) or None
+                tv_str = _pending_text_value()
                 num_info = self.numeric_params.get((pending_cls, tv_str))
                 if num_info is not None and "values" in num_info:
                     lvls = num_info["values"]
@@ -1924,7 +2055,7 @@ class DBTokenizer:
                     pending_td_key = None
                 else:
                     # Factored-continuous row-level numeric
-                    tv_str = "".join(pending_tv_pieces) or None
+                    tv_str = _pending_text_value()
                     num_info = self.numeric_params.get((pending_cls, tv_str))
                     if num_info is not None and not _math.isnan(v_i):
                         pending_nv = self.unscale(num_info, v_i)
@@ -1936,6 +2067,7 @@ class DBTokenizer:
                 # Extract class name from <|cls|>
                 pending_cls = tok[2:-2]
                 pending_tv_pieces = []
+                pending_text_is_bpe = False
                 pending_nv = None
                 pending_scaled_val = None
                 pending_td_key = None
@@ -1944,17 +2076,19 @@ class DBTokenizer:
             # ── Fused concept+numeric token (tv::LN or tv::QN) ───────
             if "::" in tok:
                 tv_part, qual = tok.rsplit("::", 1)
-                pending_tv_pieces = [tv_part]
+                pending_tv_pieces.append(tv_part)
+                pending_text_is_bpe = False
+                tv_str = _pending_text_value()
                 if qual.startswith("L"):
                     level_idx = int(qual[1:])
-                    num_info = self.numeric_params.get((pending_cls, tv_part))
+                    num_info = self.numeric_params.get((pending_cls, tv_str))
                     if num_info is not None and "values" in num_info:
                         lvls = num_info["values"]
                         idx = max(0, min(level_idx, len(lvls) - 1))
                         pending_nv = float(lvls[idx])
                 elif qual.startswith("Q"):
                     bin_idx = int(qual[1:])
-                    num_info = self.numeric_params.get((pending_cls, tv_part))
+                    num_info = self.numeric_params.get((pending_cls, tv_str))
                     if num_info is not None and "edges" in num_info:
                         pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
                 continue
@@ -1963,6 +2097,8 @@ class DBTokenizer:
             # Fused-scaling path: val at this position is the scaled nv
             if not _math.isnan(v_i):
                 pending_scaled_val = v_i
+            if tok_id not in self.ivocab:
+                pending_text_is_bpe = True
             pending_tv_pieces.append(tok)
 
         # Flush final patient
@@ -2038,6 +2174,10 @@ class DBTokenizer:
             "text_mode_default": self.text_mode_default,
             "text_mode_overrides": ser_tmo,
             "text_mode_threshold": self.text_mode_threshold,
+            "concept_splitters": {
+                cls: list(spec) if not isinstance(spec, str) else spec
+                for cls, spec in self.concept_splitters.items()
+            },
             "num_type": self.num_type,
             "num_seq": self.num_seq,
             "n_bins": self.n_bins,
@@ -2098,6 +2238,7 @@ class DBTokenizer:
             text_mode_default=cfg["text_mode_default"],
             text_mode_overrides=tmo,
             text_mode_threshold=cfg["text_mode_threshold"],
+            concept_splitters=cfg.get("concept_splitters"),
             num_type=cfg["num_type"],
             num_seq=cfg["num_seq"],
             n_bins=cfg["n_bins"],

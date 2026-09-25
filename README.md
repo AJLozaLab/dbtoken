@@ -69,6 +69,31 @@ Returns `(ids, vals)`:
 Each unique `text_value` becomes a single vocabulary token. Best for columns
 with low cardinality (lab names, vital signs, medication routes).
 
+Concept boundaries can also be prescribed per class with
+`concept_splitters`. A non-empty string performs literal delimiter splitting;
+a sequence of positive widths followed by `None` takes fixed-width chunks and
+then the remainder:
+
+```python
+tok = DBTokenizer(
+    text_mode_default="auto",
+    concept_splitters={
+        "hierarchy": "//",          # aa//bb//cc -> aa, bb, cc
+        "diagnosis": (2, 1, None),  # E11.9 -> E1, 1, .9
+    },
+)
+```
+
+A configured class resolves to concept mode before automatic cardinality
+selection unless an explicit class or `(class, text_value)` mode override
+applies. Training adds the observed pieces to the shared concept vocabulary;
+an unseen value is encodable only when all of its pieces are already known.
+Delimiter components, including empty ones, are preserved so
+`decode_to_dataframe()` can reconstruct the original value exactly.
+
+With `num_seq="fused"`, numeric information is attached to the final concept
+piece. Splitter definitions are stored in the tokenizer JSON.
+
 ### BPE Mode
 
 Free text is tokenized with byte-pair encoding. Training uses
@@ -250,6 +275,7 @@ is saved separately (tiktoken `Encoding`).
 | `text_mode_default` | str | `"auto"` | `"auto"`, `"bpe"`, or `"concept"` |
 | `text_mode_overrides` | dict | `None` | Per-class or per-`(class, text_value)` mode overrides |
 | `text_mode_threshold` | int | `64` | Auto mode: classes with > threshold unique values use BPE |
+| `concept_splitters` | dict | `None` | Per-class literal delimiters or fixed widths ending in `None` |
 | `num_type` | str | `"discrete"` | `"discrete"` or `"continuous"` |
 | `num_seq` | str | `"factored"` | `"fused"` or `"factored"` |
 | `n_bins` | int | `10` | Number of quantile bins (discrete mode) |
