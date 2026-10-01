@@ -1,0 +1,622 @@
+<style>
+* { box-sizing: border-box; }
+#db-final-demo { font-family: var(--font-sans, system-ui, sans-serif); color: #333; font-size: 13px; padding: 10px 0; }
+.db-box { border: 1px solid #ddd; border-radius: 8px; background: #fff; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.02); }
+.db-header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 1px solid #eee; padding-bottom: 12px; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+.db-title { font-size: 16px; font-weight: 600; color: #111; letter-spacing: 0.02em; text-transform: uppercase; margin-bottom: 4px; }
+.db-sub { font-size: 12px; color: #666; line-height: 1.4; max-width: 650px; }
+
+/* Section Titles */
+.sec-title { font-size: 13px; font-weight: 600; text-transform: uppercase; color: #555; margin-bottom: 10px; letter-spacing: 0.04em; display: flex; align-items: center; gap: 8px; }
+.sec-title::after { content: ""; flex-grow: 1; height: 1px; background: #eee; }
+
+/* Global Controls */
+.radio-group { display: flex; gap: 16px; font-weight: 500; background: #f0f4f8; padding: 8px 12px; border-radius: 6px; border: 1px solid #dce4eb; }
+.radio-lbl { cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 13px; color: #185FA5; }
+.radio-lbl input { cursor: pointer; margin: 0; }
+
+/* Stream Controls */
+.stream-controls { display: flex; gap: 8px; align-items: center; }
+.btn { padding: 5px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; color: #333; font-size: 12px; cursor: pointer; transition: all 0.15s; font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+.btn:hover { background: #f0f0f0; border-color: #aaa; }
+.btn.primary { background: #185FA5; color: #fff; border-color: #0C447C; }
+.btn.primary:hover { background: #0C447C; }
+
+/* Row Badges */
+.row-badge { 
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; 
+  background: #aaa; color: #fff; font-size: 10px; font-weight: bold; font-family: var(--font-mono, monospace);
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.row-badge.inj { background: #d0d0d0; color: #666; }
+
+/* -- Tables -- */
+.table-wrap { border: 1px solid #e2e8f0; border-radius: 6px; background: #fafafa; margin-bottom: 16px; }
+.table-wrap.scrollable { max-height: 180px; overflow-y: auto; }
+.src-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono, monospace); font-size: 11px; }
+.src-table thead th { position: sticky; top: 0; background: #f0f0f0; z-index: 5; text-align: left; padding: 5px 10px; color: #555; border-bottom: 1px solid #ccc; font-weight: 600; }
+.src-table td { padding: 5px 10px; border-bottom: 1px solid #eee; transition: background 0.2s; }
+.src-table tr { transition: background-color 0.1s; }
+
+/* Playback Active Row */
+.src-table tr.active { background-color: #f0f4f8; }
+.src-table tr.active .row-badge { background: #185FA5; box-shadow: 0 0 0 2px rgba(24,95,165,0.2); }
+
+/* Hover Active Row (Overrides playback styling during hover) */
+.src-table tr.hover-active { background-color: #e2e8f0; }
+.src-table tr.hover-active .row-badge { background: #0C447C; box-shadow: 0 0 0 2px rgba(12,68,124,0.3); }
+
+/* -- Stage 2: Training Panels -- */
+.train-container { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; align-items: stretch; }
+.train-code { flex: 1 1 250px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; font-family: var(--font-mono, monospace); font-size: 11px; overflow-x: auto; }
+.train-code .kw { color: #569cd6; }
+.train-code .str { color: #ce9178; }
+.train-details { flex: 2 1 450px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+.param-card { background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; font-size: 11px; }
+.param-title { font-weight: 600; color: #185FA5; margin-bottom: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px dashed #ccc; padding-bottom: 4px;}
+.desc-block { margin-bottom: 8px; }
+.desc-block:last-child { margin-bottom: 0; }
+.desc-term { font-weight: 600; color: #333; }
+.desc-text { color: #555; line-height: 1.4; margin-top: 2px; }
+.desc-text code { font-family: var(--font-mono, monospace); font-size: 10px; background: #eee; padding: 1px 3px; border-radius: 3px; color: #c23864; }
+
+/* -- Stage 3: Encoding Stream -- */
+.stream-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; font-size: 11px; padding: 8px 12px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; justify-content: space-between; align-items: center; }
+.leg-items { display: flex; flex-wrap: wrap; gap: 12px; }
+.leg-item { display: flex; align-items: center; gap: 5px; color: #555; font-weight: 500;}
+.leg-box { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); }
+
+/* Token Inspector Logic Box - Now using CSS Grid for strict alignment */
+.inspector-box { 
+  display: grid; 
+  grid-template-columns: 180px 1fr; 
+  align-items: center; gap: 16px; 
+  background: #f0f4f8; border: 1px solid #dce4eb; border-radius: 6px; 
+  padding: 10px 16px; margin-bottom: 12px; min-height: 58px; 
+}
+.inspector-placeholder { grid-column: 1 / -1; color: #888; font-style: italic; font-size: 12px; margin: 0; }
+.inspector-token-wrapper { display: flex; justify-content: flex-start; }
+.inspector-desc { font-size: 12px; color: #333; line-height: 1.4; margin: 0; padding-left: 16px; border-left: 2px solid #cbd5e1; }
+.inspector-desc b { color: #185FA5; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.inspector-tok-label { font-family: var(--font-mono, monospace); font-size: 11px; background: #e2e8f0; padding: 2px 5px; border-radius: 3px; color: #111; margin: 0 4px; font-weight: 600; border: 1px solid #cbd5e1; }
+
+.stream-wrap { 
+  padding: 12px; background: #fcfcfc; 
+  border: 1px inset #ccc; border-radius: 6px; 
+  min-height: 180px; max-height: 250px; overflow-y: auto;
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
+}
+
+/* Token Group */
+.tok-group {
+  display: inline-flex; flex-wrap: wrap; gap: 4px; 
+  padding: 12px 4px 4px; margin-top: 8px; margin-right: 4px; margin-bottom: 4px;
+  border-top: 2px solid #ddd; border-radius: 0;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.02), transparent 10px);
+  position: relative; transition: border-color 0.15s, background 0.15s;
+}
+.tok-group.active { border-top-color: #185FA5; background: linear-gradient(to bottom, rgba(24,95,165,0.04), transparent 12px); }
+.group-badge { position: absolute; top: -10px; left: -2px; }
+
+/* Tokens */
+.tok-chip {
+  display: inline-flex; align-items: stretch; font-family: var(--font-mono, monospace);
+  font-size: 11px; border-radius: 4px; border: 1px solid #999; 
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  opacity: 0; animation: popIn 0.2s forwards; cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s;
+}
+.tok-chip:hover { transform: translateY(-2px); box-shadow: 0 3px 6px rgba(0,0,0,0.1); z-index: 10; border-color: #555; }
+.tok-lbl { padding: 3px 6px; }
+.tok-val { padding: 3px 5px; font-size: 10px; border-left: 1px solid rgba(0,0,0,0.15); display: flex; align-items: center; font-weight: 600; }
+
+/* Token Colors */
+.t-struct { border-color: #888; background: #e0e0e0; color: #333; }
+.t-demo { border-color: #0F6E56; background: #E1F5EE; color: #04342C; }
+.t-cls { border-color: #3C3489; background: #534AB7; color: #EEEDFE; font-weight: bold; }
+.t-time { border-color: #BA7517; background: #FAEEDA; color: #412402; }
+.t-time .tok-val { background: rgba(186, 117, 23, 0.15); }
+.t-concept { border-color: #993556; background: #FBEAF0; color: #4B1528; }
+.t-concept .tok-val { background: rgba(153, 53, 86, 0.1); }
+.t-num { border-color: #993C1D; background: #FAECE7; color: #4A1B0C; }
+.t-bpe { border-color: #ccc; background: #fff; color: #444; }
+.sp-char { color: #BA7517; font-weight: bold; }
+
+@keyframes popIn { 0% { transform: scale(0.8); opacity: 0; } 60% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+</style>
+
+<div id="db-final-demo">
+  <div class="db-box">
+    
+    <div class="db-header">
+      <div>
+        <div class="db-title">DBTokenizer: Architecture & Encoding</div>
+        <div class="db-sub">Interactive visualization of how long-format records are parameterized and flattened.</div>
+      </div>
+      <div class="radio-group">
+        <label class="radio-lbl">
+          <input type="radio" name="num_mode" value="continuous" checked onchange="updateTrainingParams()"> Continuous
+        </label>
+        <label class="radio-lbl">
+          <input type="radio" name="num_mode" value="discrete" onchange="updateTrainingParams()"> Discrete
+        </label>
+      </div>
+    </div>
+
+    <!-- 1. Source Data (Mini) -->
+    <div class="sec-title">1. The Raw Schema</div>
+    <div class="table-wrap">
+      <table class="src-table">
+        <thead>
+          <tr><th>id</th><th>time</th><th>class</th><th>text_value</th><th>num_val</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>2024-01-02 08:00:00</td><td>lab</td><td>hemoglobin</td><td>13.2</td></tr>
+          <tr><td>1</td><td>2024-01-02 08:05:00</td><td>vital</td><td>heart_rate</td><td>78.0</td></tr>
+          <tr><td>1</td><td>2024-01-02 08:10:00</td><td>medication</td><td>lisinopril, oral, daily, mg</td><td>10.0</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 2. Training Artifacts -->
+    <div class="sec-title">2. Training & Core Concepts</div>
+    <div class="train-container" id="train-grid">
+      <!-- Injected via JS -->
+    </div>
+
+    <!-- 3. Token Stream & Full Data -->
+    <div class="sec-title" style="justify-content: space-between; margin-bottom: 8px;">
+      <span>3. Synchronized Encoding</span>
+      <div class="stream-controls">
+        <button class="btn" id="btn-reset">↺ Reset</button>
+        <button class="btn" id="btn-step">⏭ Step Row</button>
+        <button class="btn primary" id="btn-play">▶ Auto Play</button>
+      </div>
+    </div>
+    
+    <!-- Full Scrollable Table -->
+    <div class="table-wrap scrollable" id="full-table-wrap">
+      <table class="src-table">
+        <thead>
+          <tr><th style="width:40px">Row</th><th>id</th><th>time</th><th>class</th><th>text_value</th><th>num_val</th></tr>
+        </thead>
+        <tbody id="sync-tbody">
+          <tr id="row-0"><td><div class="row-badge">0</div></td><td>1</td><td>1958-03-15 00:00:00</td><td>demographic</td><td>birth_date</td><td></td></tr>
+          <tr id="row-1"><td><div class="row-badge">1</div></td><td>1</td><td>2024-01-02 08:00:00</td><td>lab</td><td>hemoglobin</td><td>13.2</td></tr>
+          <tr id="row-2"><td><div class="row-badge">2</div></td><td>1</td><td>2024-01-02 08:00:00</td><td>lab</td><td>glucose</td><td>98.0</td></tr>
+          <tr id="row-3"><td><div class="row-badge">3</div></td><td>1</td><td>2024-01-02 08:00:00</td><td>lab</td><td>creatinine</td><td>0.9</td></tr>
+          <tr id="row-4"><td><div class="row-badge">4</div></td><td>1</td><td>2024-01-02 08:05:00</td><td>vital</td><td>heart_rate</td><td>78.0</td></tr>
+          <tr id="row-5"><td><div class="row-badge">5</div></td><td>1</td><td>2024-01-02 08:05:00</td><td>vital</td><td>blood_pressure_systolic</td><td>128.0</td></tr>
+          <tr id="row-6"><td><div class="row-badge">6</div></td><td>1</td><td>2024-01-02 08:05:00</td><td>vital</td><td>blood_pressure_diastolic</td><td>82.0</td></tr>
+          <tr id="row-7"><td><div class="row-badge">7</div></td><td>1</td><td>2024-01-02 08:05:00</td><td>vital</td><td>spo2</td><td>97.0</td></tr>
+          <tr id="row-8"><td><div class="row-badge">8</div></td><td>1</td><td>2024-01-02 08:10:00</td><td>medication</td><td>lisinopril, oral, daily, mg</td><td>10.0</td></tr>
+          <tr id="row-9"><td><div class="row-badge">9</div></td><td>1</td><td>2024-01-02 08:10:00</td><td>medication</td><td>metformin, oral, BID, mg</td><td>500.0</td></tr>
+          <tr id="row-10"><td><div class="row-badge">10</div></td><td>1</td><td>2024-01-02 08:15:00</td><td>flowsheet</td><td>o2_device: room_air</td><td></td></tr>
+          <tr id="row-11"><td><div class="row-badge">11</div></td><td>1</td><td>2024-01-02 08:15:00</td><td>flowsheet</td><td>diet: regular</td><td></td></tr>
+          <tr id="row-12"><td><div class="row-badge">12</div></td><td>1</td><td>2024-01-02 08:15:00</td><td>flowsheet</td><td>fall_risk: low</td><td></td></tr>
+          <tr id="row-13"><td><div class="row-badge">13</div></td><td>1</td><td>2024-01-15 09:30:00</td><td>lab</td><td>hemoglobin</td><td>12.8</td></tr>
+          <tr id="row-14"><td><div class="row-badge">14</div></td><td>1</td><td>2024-01-15 09:30:00</td><td>lab</td><td>glucose</td><td>105.0</td></tr>
+          <tr id="row-15"><td><div class="row-badge">15</div></td><td>1</td><td>2024-01-15 09:30:00</td><td>lab</td><td>creatinine</td><td>1.0</td></tr>
+          <tr id="row-16"><td><div class="row-badge">16</div></td><td>1</td><td>2024-01-15 09:35:00</td><td>vital</td><td>heart_rate</td><td>82.0</td></tr>
+          <tr id="row-17"><td><div class="row-badge">17</div></td><td>1</td><td>2024-01-15 09:35:00</td><td>vital</td><td>blood_pressure_systolic</td><td>132.0</td></tr>
+          <tr id="row-18"><td><div class="row-badge">18</div></td><td>1</td><td>2024-01-15 09:35:00</td><td>vital</td><td>blood_pressure_diastolic</td><td>85.0</td></tr>
+          <tr id="row-19"><td><div class="row-badge">19</div></td><td>1</td><td>2024-01-15 09:35:00</td><td>vital</td><td>spo2</td><td>96.0</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Token Color Guide -->
+    <div class="stream-legend">
+      <div class="leg-items">
+        <span class="leg-item"><span class="leg-box t-struct"></span> Structural</span>
+        <span class="leg-item"><span class="leg-box t-demo"></span> Milestone / Age</span>
+        <span class="leg-item"><span class="leg-box t-cls"></span> Class Filter</span>
+        <span class="leg-item"><span class="leg-box t-time"></span> Time Delta</span>
+        <span class="leg-item"><span class="leg-box t-concept"></span> Fused Concept</span>
+        <span class="leg-item"><span class="leg-box t-num"></span> Factored Numeric</span>
+        <span class="leg-item"><span class="leg-box t-bpe"></span> BPE Subword</span>
+      </div>
+    </div>
+
+    <!-- Token Inspector Box -->
+    <div class="inspector-box" id="inspector-box">
+      <div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>
+    </div>
+
+    <!-- The Stream -->
+    <div class="stream-wrap" id="sync-stream">
+      <!-- Token groups injected here -->
+    </div>
+
+  </div>
+</div>
+
+<script>
+const getCodeSnippet = (mode) => `
+<span class="kw">tok</span> = DBTokenizer(
+  text_mode_default=<span class="str">"auto"</span>,
+  text_mode_overrides={
+    <span class="str">"lab"</span>: <span class="str">"concept"</span>,
+    <span class="str">"vital"</span>: <span class="str">"concept"</span>,
+    <span class="str">"flowsheet"</span>: <span class="str">"concept"</span>,
+  },
+  num_type=<span class="str">"${mode}"</span>,
+  num_seq=<span class="str">"fused"</span>,
+  n_bins=5,
+  milestone_ip=<span class="str">"8hr"</span>,
+  milestone_op=<span class="str">"week"</span>,
+)
+tok.train(df)`.trim();
+
+const TRAIN_DATA = {
+  continuous: [
+    { title: "Vocabulary & Numerics", 
+      blocks: [
+        { term: "BPE vs. Concept", text: "<code>BPE</code> breaks unknown text into subwords. <code>Concept</code> creates one exact token ID for the whole string. <code>lab</code> and <code>vital</code> are overridden to Concept mode here." },
+        { term: "Factored vs. Fused", text: "<b>Factored</b> mode emits numerics as a separate following token (e.g. <code>&lt;|NUM|&gt;</code>). <b>Fused</b> mode embeds the value into the text token (e.g. <code>heart_rate</code> carries the payload natively)." },
+        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), a single value cannot be mathematically split across subwords, forcing a silent fallback to Factored placement." }
+      ]
+    },
+    { title: "Temporal & State Tracking", 
+      blocks: [
+        { term: "Time Deltas (IP vs OP)", text: "Deltas measure time elapsed between rows. The engine trains different scaler curves for Inpatient events (e.g., rapid ICU checks) vs Outpatient events (e.g., clinic visits)." },
+        { term: "Grid Milestones", text: "To avoid modeling absolute timestamps, the engine relies on predictable grid anchors (e.g., <code>&lt;|ms_week_1|&gt;</code>)." },
+        { term: "The Emission Rule", text: "A milestone is only emitted if the time delta crosses a boundary. If a gap crosses <i>multiple</i> boundaries, only the <b>last</b> boundary is emitted (State Tracking)." }
+      ]
+    }
+  ],
+  discrete: [
+    { title: "Vocabulary & Numerics", 
+      blocks: [
+        { term: "BPE vs. Concept", text: "<code>BPE</code> breaks unknown text into subwords. <code>Concept</code> creates one exact token ID for the whole string. <code>lab</code> and <code>vital</code> are overridden to Concept mode here." },
+        { term: "Factored vs. Fused", text: "<b>Factored</b> mode emits numerics as a separate following token (e.g. <code>&lt;|Q1|&gt;</code>). <b>Fused</b> mode embeds the bin string directly into the text token (e.g. <code>heart_rate::Q2</code>)." },
+        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), a single quantile bin cannot be attached to multiple subwords, forcing a silent fallback to Factored placement." }
+      ]
+    },
+    { title: "Temporal & State Tracking", 
+      blocks: [
+        { term: "Time Deltas (IP vs OP)", text: "Deltas measure time elapsed between rows. The engine trains different N-Quantile bins for Inpatient events (e.g., < 1 hour) vs Outpatient events (e.g., > 1 week)." },
+        { term: "Grid Milestones", text: "To avoid modeling absolute timestamps, the engine relies on predictable grid anchors (e.g., <code>&lt;|ms_week_1|&gt;</code>)." },
+        { term: "The Emission Rule", text: "A milestone is only emitted if the time delta crosses a boundary. If a gap crosses <i>multiple</i> boundaries, only the <b>last</b> boundary is emitted (State Tracking)." }
+      ]
+    }
+  ]
+};
+
+// Map tooltip/inspector data. Format: "TypeName:Description"
+const TT = {
+  sos: "Structural:Start of Sequence.",
+  eos: "Structural:End of Sequence.",
+  age: "State Tracker:Patient age derived from Row 0. Injected automatically.",
+  cls: "Class Filter:Declares the schema category of the upcoming sequence.",
+  l_fuse: "Fused Concept (Level):Distinct values fall below threshold, mapping to exact discrete 'Levels'.",
+  c_fuse: "Fused Concept (Continuous):Text token natively carries the centered/scaled continuous float.",
+  q_fuse: "Fused Concept (Bin):Continuous values parameterized into discrete Quantile bins.",
+  dt_c: "Time Delta (Continuous):Gap between rows, expressed as a Gamma-scaled continuous float.",
+  dt_q: "Time Delta (Bin):Gap between rows, sorted into a discrete Quantile bin.",
+  ms: "State Tracker (Milestone):Indicates the time gap just crossed a logical grid boundary.",
+  bpe: "BPE Subword:High-cardinality text broken into smaller learned chunks.",
+  f_num: "Factored Numeric:BPE mode forces the payload into a separate, following numeric token.",
+  f_bin: "Factored Bin:BPE mode forces the quantile bin into a separate, following numeric token.",
+  c_none: "Concept Token:String token without any numeric payload."
+};
+
+const STREAM_SEQ = {
+  continuous: [
+    { r: 0, tok: "<|sos|>", type: "t-struct", val: null, desc: TT.sos },
+    { r: 1, tok: "<|age_65|>", type: "t-demo", val: null, desc: TT.age },
+    { r: 1, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 1, tok: "hemoglobin::L7", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 2, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 2, tok: "glucose::L2", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 3, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 3, tok: "creatinine::L1", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 4, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 4, tok: "<|ms_week_1|>", type: "t-demo", val: null, desc: TT.ms },
+    { r: 4, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 4, tok: "heart_rate", type: "t-concept", val: -0.557, desc: TT.c_fuse },
+    { r: 5, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 5, tok: "blood_pressure_systolic", type: "t-concept", val: -0.555, desc: TT.c_fuse },
+    { r: 6, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 6, tok: "blood_pressure_diastolic::L3", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 7, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 7, tok: "spo2::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 8, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 8, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 8, tok: "lisinopril", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " oral", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " daily", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: "<|NUM|>", type: "t-num", val: -0.855, desc: TT.f_num },
+    { r: 9, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 9, tok: "metformin", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " oral", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " BID", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: "<|NUM|>", type: "t-num", val: 1.250, desc: TT.f_num },
+    { r: 10, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 13, tok: "<|delta_time_op|>", type: "t-time", val: 1.572, desc: TT.dt_c },
+    { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
+    { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 13, tok: "hemoglobin::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 14, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 14, tok: "glucose::L3", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 15, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 15, tok: "creatinine::L2", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 16, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 16, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 16, tok: "heart_rate", type: "t-concept", val: -0.132, desc: TT.c_fuse },
+    { r: 17, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 17, tok: "blood_pressure_systolic", type: "t-concept", val: -0.151, desc: TT.c_fuse },
+    { r: 18, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 18, tok: "blood_pressure_diastolic::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 19, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: "end", tok: "<|eos|>", type: "t-struct", val: null, desc: TT.eos }
+  ],
+  discrete: [
+    { r: 0, tok: "<|sos|>", type: "t-struct", val: null, desc: TT.sos },
+    { r: 1, tok: "<|age_65|>", type: "t-demo", val: null, desc: TT.age },
+    { r: 1, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 1, tok: "hemoglobin::L7", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 2, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 2, tok: "glucose::L2", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 3, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 3, tok: "creatinine::L1", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 4, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 4, tok: "<|ms_week_1|>", type: "t-demo", val: null, desc: TT.ms },
+    { r: 4, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 4, tok: "heart_rate::Q2", type: "t-concept", val: null, desc: TT.q_fuse },
+    { r: 5, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 5, tok: "blood_pressure_systolic::Q2", type: "t-concept", val: null, desc: TT.q_fuse },
+    { r: 6, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 6, tok: "blood_pressure_diastolic::L3", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 7, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 7, tok: "spo2::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 8, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 8, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 8, tok: "lisinopril", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " oral", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " daily", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 8, tok: "<|Q1|>", type: "t-num", val: null, desc: TT.f_bin },
+    { r: 9, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 9, tok: "metformin", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " oral", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " BID", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
+    { r: 9, tok: "<|Q3|>", type: "t-num", val: null, desc: TT.f_bin },
+    { r: 10, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
+    { r: 13, tok: "<|delta_time_op_Q5|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
+    { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 13, tok: "hemoglobin::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 14, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 14, tok: "glucose::L3", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 15, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 15, tok: "creatinine::L2", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 16, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 16, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 16, tok: "heart_rate::Q3", type: "t-concept", val: null, desc: TT.q_fuse },
+    { r: 17, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 17, tok: "blood_pressure_systolic::Q3", type: "t-concept", val: null, desc: TT.q_fuse },
+    { r: 18, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: 18, tok: "blood_pressure_diastolic::L5", type: "t-concept", val: null, desc: TT.l_fuse },
+    { r: 19, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
+    { r: "end", tok: "<|eos|>", type: "t-struct", val: null, desc: TT.eos }
+  ]
+};
+
+const streamEl = document.getElementById('sync-stream');
+const tableWrap = document.getElementById('full-table-wrap');
+const inspectorBox = document.getElementById('inspector-box');
+let timer = null;
+let cursor = 0;
+let lastRowId = null;
+let currentGroup = null;
+
+function formatToken(text) {
+  if (text.startsWith(" ")) return `<span class="sp-char">·</span>${text.slice(1)}`;
+  return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function updateTrainingParams() {
+  const mode = document.querySelector('input[name="num_mode"]:checked').value;
+  const grid = document.getElementById('train-grid');
+  
+  let detailsHtml = '';
+  TRAIN_DATA[mode].forEach(card => {
+    let blocksHtml = card.blocks.map(b => `
+      <div class="desc-block">
+        <span class="desc-term">${b.term}:</span>
+        <span class="desc-text">${b.text}</span>
+      </div>
+    `).join('');
+    
+    detailsHtml += `<div class="param-card">
+                      <div class="param-title">${card.title}</div>
+                      ${blocksHtml}
+                    </div>`;
+  });
+  
+  grid.innerHTML = `
+    <div class="train-code"><pre>${getCodeSnippet(mode)}</pre></div>
+    <div class="train-details">${detailsHtml}</div>
+  `;
+  
+  resetStream();
+}
+
+function setActiveRow(rowId) {
+  document.querySelectorAll('#sync-tbody tr').forEach(tr => tr.classList.remove('active'));
+  document.querySelectorAll('.tok-group').forEach(g => g.classList.remove('active'));
+  
+  if (rowId !== null && rowId !== "end") {
+    const target = document.getElementById(`row-${rowId}`);
+    if (target) {
+      target.classList.add('active');
+      const targetRect = target.getBoundingClientRect();
+      const wrapRect = tableWrap.getBoundingClientRect();
+      if (targetRect.bottom > wrapRect.bottom || targetRect.top < wrapRect.top) {
+        tableWrap.scrollTop = target.offsetTop - (wrapRect.height / 2) + (targetRect.height / 2);
+      }
+    }
+  }
+  if (currentGroup) currentGroup.classList.add('active');
+}
+
+function getSequence() {
+  return STREAM_SEQ[document.querySelector('input[name="num_mode"]:checked').value];
+}
+
+function createGroup(rowId) {
+  currentGroup = document.createElement('div');
+  currentGroup.className = 'tok-group active';
+  
+  const badge = document.createElement('div');
+  badge.className = `row-badge group-badge ${rowId === 'end' ? 'inj' : ''}`;
+  badge.textContent = rowId === 'end' ? 'END' : rowId;
+  
+  currentGroup.appendChild(badge);
+  streamEl.appendChild(currentGroup);
+}
+
+function renderNextToken() {
+  const seq = getSequence();
+  if (cursor >= seq.length) {
+    pauseStream();
+    setActiveRow(null);
+    return false;
+  }
+
+  const data = seq[cursor];
+
+  if (data.r !== lastRowId) {
+    createGroup(data.r);
+    setActiveRow(data.r);
+    lastRowId = data.r;
+  }
+
+  const chip = document.createElement('div');
+  chip.className = `tok-chip ${data.type}`;
+  
+  let innerHTML = `<div class="tok-lbl">${formatToken(data.tok)}</div>`;
+  if (data.val !== null) {
+    innerHTML += `<div class="tok-val">${data.val.toFixed(3)}</div>`;
+  }
+  
+  chip.innerHTML = innerHTML;
+  
+  // Custom Inspector & Hover Highlight Logic
+  chip.onmouseenter = () => {
+    // 1. Highlight Row
+    document.querySelectorAll('#sync-tbody tr').forEach(tr => tr.classList.remove('hover-active'));
+    if (data.r !== "end") {
+      const hoverRow = document.getElementById(`row-${data.r}`);
+      if (hoverRow) hoverRow.classList.add('hover-active');
+    }
+
+    // 2. Populate Inspector
+    const clone = chip.cloneNode(true);
+    clone.style.animation = 'none';
+    clone.style.cursor = 'default';
+    clone.style.transform = 'none';
+    clone.style.margin = '0';
+    
+    const parts = data.desc.split(':');
+    const typeName = parts[0];
+    const definition = parts.slice(1).join(':').trim();
+    
+    const wrapper = document.createElement('div');
+    wrapper.className = 'inspector-token-wrapper';
+    wrapper.appendChild(clone);
+    
+    const descDiv = document.createElement('div');
+    descDiv.className = 'inspector-desc';
+    descDiv.innerHTML = `<b>${typeName}</b> <span class="inspector-tok-label">${formatToken(data.tok)}</span> &mdash; ${definition}`;
+    
+    inspectorBox.innerHTML = '';
+    inspectorBox.appendChild(wrapper);
+    inspectorBox.appendChild(descDiv);
+  };
+  
+  chip.onmouseleave = () => {
+    document.querySelectorAll('#sync-tbody tr').forEach(tr => tr.classList.remove('hover-active'));
+    inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>';
+  };
+  
+  currentGroup.appendChild(chip);
+  
+  streamEl.scrollTop = streamEl.scrollHeight;
+  cursor++;
+  return true;
+}
+
+function stepRow() {
+  pauseStream();
+  const seq = getSequence();
+  if (cursor >= seq.length) return;
+  
+  const targetRow = seq[cursor].r;
+  while (cursor < seq.length && seq[cursor].r === targetRow) {
+    renderNextToken();
+  }
+}
+
+function playStream() {
+  if (timer) { pauseStream(); return; }
+  const seq = getSequence();
+  if (cursor >= seq.length) resetStream();
+  
+  document.getElementById('btn-play').textContent = '⏸ Pause';
+  timer = setInterval(renderNextToken, 100);
+}
+
+function pauseStream() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  document.getElementById('btn-play').textContent = '▶ Auto Play';
+}
+
+function resetStream() {
+  pauseStream();
+  cursor = 0;
+  lastRowId = null;
+  currentGroup = null;
+  streamEl.innerHTML = '';
+  inspectorBox.innerHTML = '<div class="inspector-placeholder">Hover over any token in the stream below to inspect its logic and highlight its source row.</div>';
+  setActiveRow(null);
+  tableWrap.scrollTop = 0;
+}
+
+document.getElementById('btn-play').onclick = playStream;
+document.getElementById('btn-step').onclick = stepRow;
+document.getElementById('btn-reset').onclick = resetStream;
+
+updateTrainingParams();
+</script>

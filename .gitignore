@@ -1,0 +1,13 @@
+instruct.md
+instruct2.md
+*.csv
+*.pyc
+rustbpe-master/target/
+__pycache__/
+*.zip
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+*.docx
