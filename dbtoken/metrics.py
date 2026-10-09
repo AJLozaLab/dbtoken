@@ -244,9 +244,10 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
                 adj[i] = math.log2(w)
             continue
 
-        # --- Fused concept+Q (hemoglobin::Q5) ---
-        if ttype == "fused_concept_Q":
-            m = _RE_Q_IDX.search(tok)
+        # --- Fused concept+Q (hemoglobin::Q5, <|lab:hemoglobin|>::Q5) ---
+        if ttype in ("fused_concept_Q", "class_concept_Q"):
+            # Match only the ::QN suffix — the concept piece may contain "Q<digits>"
+            m = _RE_Q_IDX.search(tok.rsplit("::", 1)[-1])
             if m and "edges" in ctx:
                 bin_idx = int(m.group(1))
                 w = _bin_width(ctx["edges"], bin_idx, ctx)
@@ -270,7 +271,8 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
 
         # --- Fused concept carrying a continuous value ---
         # (concept token where vals[i] is non-NaN and context is scaling)
-        if ttype == "concept" and ctx is not None and ctx.get("type") == "scaling":
+        if (ttype in ("concept", "class_concept")
+                and ctx is not None and ctx.get("type") == "scaling"):
             z = vals[i] if (vals is not None and not math.isnan(vals[i])) else None
             if z is not None:
                 log_jac = _jacobian_log_abs(ctx, z_value=z)
@@ -301,7 +303,18 @@ _GROUP_MAP = {
     "L":                 "level",
     "fused_concept_Q":   "fused",
     "fused_concept_L":   "fused",
+    # Class folded into the first concept piece (fuse_class_to_concept):
+    # the class information rides in the text / fused groups.
+    "class_concept":     "text",
+    "class_concept_Q":   "fused",
+    "class_concept_L":   "fused",
 }
+
+# Token types that open a new row (a standalone class token, or the class
+# fused into the first concept piece).
+_ROW_START_TYPES = frozenset(
+    {"class", "class_concept", "class_concept_Q", "class_concept_L"}
+)
 
 
 def _assign_groups(types, contexts):
@@ -454,7 +467,7 @@ def bits_per_row(
                 accum[g] = accum.get(g, 0.0) + adj_b
                 total_tokens += 1
 
-                if g == "class":
+                if types[t] in _ROW_START_TYPES:
                     total_rows += 1
 
     # ── Aggregate ─────────────────────────────────────────────────────

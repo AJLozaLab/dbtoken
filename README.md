@@ -94,6 +94,34 @@ Delimiter components, including empty ones, are preserved so
 With `num_seq="fused"`, numeric information is attached to the final concept
 piece. Splitter definitions are stored in the tokenizer JSON.
 
+#### Class fusion and namespacing
+
+By default a concept row is emitted as a class token followed by its pieces,
+and pieces live in one shared vocabulary: `XX` under `<|abcd|>` and `XX` under
+`<|efgh|>` are the same token (as are fused numeric tokens such as `XX::Q0`,
+even though their bin edges differ per group). Two opt-in flags change this:
+
+- `fuse_class_to_concept=True` folds the class token into the first concept
+  piece, saving one token per concept row. BPE rows and rows with a null
+  `text_value` keep a standalone class token.
+- `namespace_concepts_by_class=True` prefixes every remaining piece with its
+  class, so identical pieces in different classes get different ids.
+
+| Row (`abcd`, `XX//aa`, fused bin 0) | Tokens |
+|---|---|
+| default | `<\|abcd\|>`, `XX`, `aa::Q0` |
+| `fuse_class_to_concept` | `<\|abcd:XX\|>`, `aa::Q0` |
+| `namespace_concepts_by_class` | `<\|abcd\|>`, `abcd:XX`, `abcd:aa::Q0` |
+| both | `<\|abcd:XX\|>`, `abcd:aa::Q0` |
+
+A single-piece concept with `num_seq="fused"` fuses class, concept and
+numeric into one token (`<|lab:hemoglobin|>::Q3`). Fused tokens classify as
+`class_concept` / `class_concept_Q` / `class_concept_L`; in `bits_per_row`
+they count as row starts but their bits land in the `text` / `fused` groups,
+so `class_bpr` drops toward zero when fusion is on. Training raises
+`ValueError` if a generated token collides with a class token (e.g. class
+`a:b` alongside class `a` with value `b`).
+
 ### BPE Mode
 
 Free text is tokenized with byte-pair encoding. Training uses
@@ -276,6 +304,8 @@ is saved separately (tiktoken `Encoding`).
 | `text_mode_overrides` | dict | `None` | Per-class or per-`(class, text_value)` mode overrides |
 | `text_mode_threshold` | int | `64` | Auto mode: classes with > threshold unique values use BPE |
 | `concept_splitters` | dict | `None` | Per-class literal delimiters or fixed widths ending in `None` |
+| `fuse_class_to_concept` | bool | `False` | Fold the class token into the first concept piece (`<\|cls:piece\|>`) |
+| `namespace_concepts_by_class` | bool | `False` | Prefix concept pieces with their class (`cls:piece`) |
 | `num_type` | str | `"discrete"` | `"discrete"` or `"continuous"` |
 | `num_seq` | str | `"factored"` | `"fused"` or `"factored"` |
 | `n_bins` | int | `10` | Number of quantile bins (discrete mode) |
