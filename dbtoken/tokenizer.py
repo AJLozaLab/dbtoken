@@ -306,6 +306,7 @@ class DBTokenizer:
         bin_clip_max: float = 99.0,
         continuous_clip_min: float = 1.0,
         continuous_clip_max: float = 99.0,
+        continuous_clip_values: bool = True,
         distributions: Optional[Dict[str, List[str]]] = None,
         # --- BPE settings ---
         final_vocab_size: int = 4096,
@@ -374,6 +375,7 @@ class DBTokenizer:
         self.bin_clip_max = bin_clip_max
         self.continuous_clip_min = continuous_clip_min
         self.continuous_clip_max = continuous_clip_max
+        self.continuous_clip_values = bool(continuous_clip_values)
         self.distributions = distributions
         self.final_vocab_size = final_vocab_size
         self.split_pattern = split_pattern
@@ -1382,7 +1384,7 @@ class DBTokenizer:
         elif ni["type"] == "scaling":
             ids.append(self._tok_id(final_piece))
             if vals is not None:
-                vals.append(self.scale(ni, nv))
+                vals.append(self._scale_value(ni, nv))
 
     def _emit_factored_numeric(
         self, ids: list, vals: Optional[list], nv: float, ni: dict,
@@ -1401,7 +1403,7 @@ class DBTokenizer:
         elif ni["type"] == "scaling":
             ids.append(self.vocab["<|NUM|>"])
             if vals is not None:
-                vals.append(self.scale(ni, nv))
+                vals.append(self._scale_value(ni, nv))
 
     # ·····  token / level look-ups  ···································
 
@@ -1478,10 +1480,10 @@ class DBTokenizer:
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def scale(params: dict, x: float) -> float:
+    def scale(params: dict, x: float, clip: bool = True) -> float:
         lo = params.get("min_threshold")
         hi = params.get("max_threshold")
-        if lo is not None and hi is not None:
+        if clip and lo is not None and hi is not None:
             x = max(lo, min(x, hi))
         f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["scale"](params, x) if f else x
@@ -1491,8 +1493,14 @@ class DBTokenizer:
         f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["unscale"](params, x_scaled) if f else x_scaled
 
+    def _scale_value(self, params: dict, x: float) -> float:
+        """Scale *x* for encoding, clamping to the clip thresholds only when
+        ``continuous_clip_values`` is set (parameters are always fit on
+        clipped values)."""
+        return self.scale(params, x, clip=self.continuous_clip_values)
+
     def _scale_td(self, dt: float, params: dict) -> float:
-        return self.scale(params, dt)
+        return self._scale_value(params, dt)
 
     # ──────────────────────────────────────────────────────────────────────
     # Token classification (for metrics)
@@ -1697,6 +1705,10 @@ class DBTokenizer:
                 m = _re_td_mrk.match(tok)
                 if m:
                     pending_td_key = m.group(1)
+                    # Fused continuous: the marker itself carries the value
+                    td = self.time_delta_params.get(pending_td_key)
+                    if td is not None:
+                        out[i] = {**td, "_is_time_delta": True}
                 continue
 
             # Q or NUM following a time-delta marker
@@ -1883,7 +1895,7 @@ class DBTokenizer:
                             ))
                             concept_parts[-1] = f"{concept_parts[-1]}::Q{bi}"
                         elif num_info["type"] == "scaling":
-                            s = self.scale(num_info, nv)
+                            s = self._scale_value(num_info, nv)
                             concept_parts[-1] = f"{concept_parts[-1]}({s:.3f})"
                     rt.extend(concept_parts)
                 else:
@@ -1901,7 +1913,7 @@ class DBTokenizer:
                     bi = int(np.digitize(nv, num_info["edges"], right=False))
                     rt.append(f"<|Q{bi}|>")
                 elif num_info["type"] == "scaling":
-                    s = self.scale(num_info, nv)
+                    s = self._scale_value(num_info, nv)
                     rt.append(f"<|NUM|>({s:.3f})")
 
             tokens_col.append(rt)
@@ -2318,6 +2330,7 @@ class DBTokenizer:
             "bin_clip_max": self.bin_clip_max,
             "continuous_clip_min": self.continuous_clip_min,
             "continuous_clip_max": self.continuous_clip_max,
+            "continuous_clip_values": self.continuous_clip_values,
             "distributions": self.distributions,
             "final_vocab_size": self.final_vocab_size,
             "split_pattern": self.split_pattern,
@@ -2386,6 +2399,7 @@ class DBTokenizer:
             bin_clip_max=cfg["bin_clip_max"],
             continuous_clip_min=cfg["continuous_clip_min"],
             continuous_clip_max=cfg["continuous_clip_max"],
+            continuous_clip_values=cfg.get("continuous_clip_values", True),
             distributions=cfg.get("distributions"),
             final_vocab_size=cfg["final_vocab_size"],
             split_pattern=cfg["split_pattern"],
