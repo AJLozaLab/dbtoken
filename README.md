@@ -373,3 +373,25 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+## Publishing releases
+
+The [Publish to PyPI workflow](.github/workflows/publish-pypi.yml) uploads a
+wheel and source distribution whenever a GitHub release is published. It
+uses the repository's `PYPI_API_TOKEN` Actions secret.
+
+To publish a new version:
+
+1. Update `__version__` in `dbtoken/__init__.py` and merge the change into `main`.
+2. Create a GitHub release from that commit with a matching version tag, such
+   as `v0.5.0` for package version `0.5.0`. Tags without the `v` prefix also work.
+3. Publish the release. The workflow checks the version, runs the tests,
+   builds both distributions, validates their metadata, and uploads them to PyPI.
+
+Publishing a prerelease also triggers the workflow; use a matching Python
+prerelease version, such as `0.5.0rc1` with tag `v0.5.0rc1`. Each release must
+use a new version because PyPI does not allow replacing existing distributions.
+The workflow must be included in the tagged commit.
+
+Pull requests and manual workflow runs perform the build checks without
+uploading to PyPI. Publication begins only when a GitHub release is published.
