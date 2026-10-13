@@ -6,6 +6,8 @@ Tokenizes tables with schema: id, time, class, text_value, numeric_value
 Supports:
   - Per-class (or per-(class, text_value)) text tokenization: BPE or concept
   - Per-class delimiter or fixed-width splitting into concept tokens
+  - Optional class/concept fusion (class token folded into the first concept
+    piece) and per-class namespacing of concept pieces
   - Numeric tokenization: discrete (quantile bins), continuous (distribution
     scaling), or categorical levels (≤ threshold distinct values → L tokens)
   - Fused or factored numeric sequence placement (fused auto-enforced only
@@ -293,6 +295,8 @@ class DBTokenizer:
         concept_splitters: Optional[
             Dict[str, Union[str, Sequence[Optional[int]]]]
         ] = None,
+        fuse_class_to_concept: bool = False,
+        namespace_concepts_by_class: bool = False,
         # --- numeric tokenization ---
         num_type: str = "discrete",               # 'discrete' or 'continuous'
         num_seq: str = "factored",                # 'fused' or 'factored'
@@ -302,6 +306,7 @@ class DBTokenizer:
         bin_clip_max: float = 99.0,
         continuous_clip_min: float = 1.0,
         continuous_clip_max: float = 99.0,
+        continuous_clip_values: bool = True,
         distributions: Optional[Dict[str, List[str]]] = None,
         # --- BPE settings ---
         final_vocab_size: int = 4096,
@@ -360,6 +365,8 @@ class DBTokenizer:
         self.text_mode_overrides: Dict = text_mode_overrides or {}
         self.text_mode_threshold = text_mode_threshold
         self.concept_splitters = normalized_splitters
+        self.fuse_class_to_concept = bool(fuse_class_to_concept)
+        self.namespace_concepts_by_class = bool(namespace_concepts_by_class)
         self.num_type = num_type
         self.num_seq = num_seq
         self.n_bins = n_bins
@@ -368,6 +375,7 @@ class DBTokenizer:
         self.bin_clip_max = bin_clip_max
         self.continuous_clip_min = continuous_clip_min
         self.continuous_clip_max = continuous_clip_max
+        self.continuous_clip_values = bool(continuous_clip_values)
         self.distributions = distributions
         self.final_vocab_size = final_vocab_size
         self.split_pattern = split_pattern
@@ -394,6 +402,8 @@ class DBTokenizer:
         self._trained: bool = False
         self._birth_dates: Dict = {}   # id → datetime, extracted from data
         self._concept_split_cache: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+        # Fused / namespaced concept token → (class, raw piece, is_class_fused)
+        self.concept_token_meta: Dict[str, Tuple[str, str, bool]] = {}
 
     # ─── Schema validation ────────────────────────────────────────────────
 
@@ -476,6 +486,48 @@ class DBTokenizer:
 
         self._concept_split_cache[key] = parts
         return parts
+
+    def _concept_tokens(self, cls: str, text_value: str) -> Tuple[str, ...]:
+        """Return the emitted token strings for a concept-mode text value.
+
+        Applies ``fuse_class_to_concept`` (first piece becomes
+        ``<|cls:piece|>``) and ``namespace_concepts_by_class`` (remaining
+        pieces become ``cls:piece``) on top of :meth:`_split_concept`.
+        """
+        parts = self._split_concept(cls, text_value)
+        if not (self.fuse_class_to_concept or self.namespace_concepts_by_class):
+            return parts
+        out: List[str] = []
+        for i, part in enumerate(parts):
+            if i == 0 and self.fuse_class_to_concept:
+                out.append(f"<|{cls}:{part}|>")
+            elif self.namespace_concepts_by_class:
+                out.append(f"{cls}:{part}")
+            else:
+                out.append(part)
+        return tuple(out)
+
+    def _concept_piece_info(
+        self, tok: str,
+    ) -> Optional[Tuple[str, str, bool, Optional[str]]]:
+        """Look up a fused / namespaced concept token.
+
+        Returns ``(cls, raw_piece, is_class_fused, qual)`` where *qual* is the
+        fused numeric suffix (``'Q3'``, ``'L2'``) or ``None``; returns ``None``
+        for tokens not in :attr:`concept_token_meta`.
+        """
+        meta = self.concept_token_meta
+        if not meta:
+            return None
+        info = meta.get(tok)
+        if info is not None:
+            return info[0], info[1], info[2], None
+        if "::" in tok:
+            base, qual = tok.rsplit("::", 1)
+            info = meta.get(base)
+            if info is not None and qual[:1] in ("Q", "L") and qual[1:].isdigit():
+                return info[0], info[1], info[2], qual
+        return None
 
     def _join_concept_parts(self, cls: Optional[str], parts: List[str]) -> Optional[str]:
         """Reconstruct a concept text value from its emitted pieces."""
@@ -940,6 +992,7 @@ class DBTokenizer:
         # ── Concept text tokens ──────────────────────────────────────
         concept_tokens: List[str] = []
         concept_text_vals = set()
+        self.concept_token_meta = {}
         for row in df.select(["class", "text_value"]).unique().iter_rows(named=True):
             cls = row["class"]
             tv = row["text_value"]
@@ -947,8 +1000,23 @@ class DBTokenizer:
                 continue
             mode = self._get_text_mode(cls, tv)
             if mode == "concept":
-                concept_text_vals.update(self._split_concept(cls, tv))
+                toks = self._concept_tokens(cls, tv)
+                concept_text_vals.update(toks)
+                parts = self._split_concept(cls, tv)
+                for i, (t, part) in enumerate(zip(toks, parts)):
+                    fused = i == 0 and self.fuse_class_to_concept
+                    if fused or self.namespace_concepts_by_class:
+                        self.concept_token_meta[t] = (cls, part, fused)
         concept_tokens.extend(concept_text_vals)
+
+        # Generated concept tokens must not alias special/class tokens
+        special_set = set(special)
+        clashes = sorted(t for t in self.concept_token_meta if t in special_set)
+        if clashes:
+            raise ValueError(
+                f"Fused/namespaced concept tokens collide with special or "
+                f"class tokens: {clashes[:5]}"
+            )
 
         # Fused concept+numeric tokens
         if self.num_seq == "fused":
@@ -959,7 +1027,7 @@ class DBTokenizer:
                 mode = self._get_text_mode(cls, tv)
                 if mode != "concept":
                     continue
-                final_piece = self._split_concept(cls, tv)[-1]
+                final_piece = self._concept_tokens(cls, tv)[-1]
                 if params["type"] == "level":
                     for i in range(len(params["values"])):
                         concept_tokens.append(f"{final_piece}::L{i}")
@@ -1181,13 +1249,20 @@ class DBTokenizer:
             if ts is not None:
                 last_time = ts
 
-            # ── Class token ───────────────────────────────────────────
-            ids.append(self.vocab[f"<|{cls}|>"])
-            if vals is not None:
-                vals.append(float("nan"))
-
-            # ── Resolve effective text mode and num_seq ───────────────
+            # ── Resolve effective text mode ───────────────────────────
             text_mode = self._get_text_mode(cls, tv)
+
+            # ── Class token (folded into the first concept piece) ─────
+            if not (
+                self.fuse_class_to_concept
+                and tv is not None
+                and text_mode == "concept"
+            ):
+                ids.append(self.vocab[f"<|{cls}|>"])
+                if vals is not None:
+                    vals.append(float("nan"))
+
+            # ── Resolve effective num_seq ─────────────────────────────
             eff_seq = (
                 "fused"
                 if self.num_seq == "fused" and text_mode == "concept"
@@ -1204,7 +1279,7 @@ class DBTokenizer:
             # ── Text tokens ───────────────────────────────────────────
             if tv is not None:
                 if text_mode == "concept":
-                    concept_parts = self._split_concept(cls, tv)
+                    concept_parts = self._concept_tokens(cls, tv)
                     if eff_seq == "fused" and has_num and num_info is not None:
                         self._emit_fused_concept(
                             ids, vals, concept_parts, nv, num_info
@@ -1309,7 +1384,7 @@ class DBTokenizer:
         elif ni["type"] == "scaling":
             ids.append(self._tok_id(final_piece))
             if vals is not None:
-                vals.append(self.scale(ni, nv))
+                vals.append(self._scale_value(ni, nv))
 
     def _emit_factored_numeric(
         self, ids: list, vals: Optional[list], nv: float, ni: dict,
@@ -1328,7 +1403,7 @@ class DBTokenizer:
         elif ni["type"] == "scaling":
             ids.append(self.vocab["<|NUM|>"])
             if vals is not None:
-                vals.append(self.scale(ni, nv))
+                vals.append(self._scale_value(ni, nv))
 
     # ·····  token / level look-ups  ···································
 
@@ -1405,10 +1480,10 @@ class DBTokenizer:
     # ──────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def scale(params: dict, x: float) -> float:
+    def scale(params: dict, x: float, clip: bool = True) -> float:
         lo = params.get("min_threshold")
         hi = params.get("max_threshold")
-        if lo is not None and hi is not None:
+        if clip and lo is not None and hi is not None:
             x = max(lo, min(x, hi))
         f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["scale"](params, x) if f else x
@@ -1418,8 +1493,14 @@ class DBTokenizer:
         f = _SCALING_FORMULAS.get(params.get("distribution"))
         return f["unscale"](params, x_scaled) if f else x_scaled
 
+    def _scale_value(self, params: dict, x: float) -> float:
+        """Scale *x* for encoding, clamping to the clip thresholds only when
+        ``continuous_clip_values`` is set (parameters are always fit on
+        clipped values)."""
+        return self.scale(params, x, clip=self.continuous_clip_values)
+
     def _scale_td(self, dt: float, params: dict) -> float:
-        return self.scale(params, dt)
+        return self._scale_value(params, dt)
 
     # ──────────────────────────────────────────────────────────────────────
     # Token classification (for metrics)
@@ -1435,7 +1516,8 @@ class DBTokenizer:
             'class',
             'concept', 'bpe',
             'Q', 'L',
-            'fused_concept_Q', 'fused_concept_L'
+            'fused_concept_Q', 'fused_concept_L',
+            'class_concept', 'class_concept_Q', 'class_concept_L'
         """
         import re as _re
 
@@ -1457,6 +1539,15 @@ class DBTokenizer:
 
         # Classify everything in self.vocab (special + concept tokens)
         for tok_str, tok_id in self.vocab.items():
+            info = self._concept_piece_info(tok_str)
+            if info is not None:
+                _, _, fused, qual = info
+                prefix = "class_concept" if fused else "fused_concept"
+                if qual is not None:
+                    lookup[tok_id] = f"{prefix}_{qual[0]}"
+                else:
+                    lookup[tok_id] = "class_concept" if fused else "concept"
+                continue
             if tok_str == "<|sos|>":
                 lookup[tok_id] = "sos"
             elif tok_str == "<|eos|>":
@@ -1505,7 +1596,8 @@ class DBTokenizer:
             'milestone', 'age', 'class',
             'concept', 'bpe',
             'Q', 'L',
-            'fused_concept_Q', 'fused_concept_L'
+            'fused_concept_Q', 'fused_concept_L',
+            'class_concept', 'class_concept_Q', 'class_concept_L'
         """
         if not hasattr(self, "_token_type_lookup"):
             self._token_type_lookup = self._build_token_type_lookup()
@@ -1554,9 +1646,26 @@ class DBTokenizer:
                 bpe_pieces = []
                 continue
 
+            # Fused / namespaced concept tokens carry their raw piece in meta
+            info = self._concept_piece_info(tok)
+            if info is not None and info[2]:
+                # Class-fused first piece starts a new row context
+                current_cls = info[0]
+                pending_td_key = None
+                concept_pieces = [info[1]]
+                bpe_pieces = []
+                current_tv = self._join_concept_parts(current_cls, concept_pieces)
+                ni = self.numeric_params.get((current_cls, current_tv))
+                if ttype in ("class_concept_Q", "class_concept_L"):
+                    out[i] = ni
+                elif ni is not None and ni.get("type") == "scaling":
+                    out[i] = ni
+                continue
+            piece = info[1] if info is not None else None
+
             # Track text context
             if ttype == "concept":
-                concept_pieces.append(tok)
+                concept_pieces.append(piece if piece is not None else tok)
                 current_tv = self._join_concept_parts(current_cls, concept_pieces)
                 bpe_pieces = []
                 ni = self.numeric_params.get((current_cls, current_tv))
@@ -1596,6 +1705,10 @@ class DBTokenizer:
                 m = _re_td_mrk.match(tok)
                 if m:
                     pending_td_key = m.group(1)
+                    # Fused continuous: the marker itself carries the value
+                    td = self.time_delta_params.get(pending_td_key)
+                    if td is not None:
+                        out[i] = {**td, "_is_time_delta": True}
                 continue
 
             # Q or NUM following a time-delta marker
@@ -1617,7 +1730,7 @@ class DBTokenizer:
             # Fused concept tokens
             if ttype in ("fused_concept_Q", "fused_concept_L"):
                 bpe_pieces = []
-                tv_part = tok.rsplit("::", 1)[0]
+                tv_part = piece if piece is not None else tok.rsplit("::", 1)[0]
                 concept_pieces.append(tv_part)
                 current_tv = self._join_concept_parts(current_cls, concept_pieces)
                 out[i] = self.numeric_params.get((current_cls, current_tv))
@@ -1749,9 +1862,14 @@ class DBTokenizer:
             if ts is not None:
                 last_time = ts
 
-            rt.append(f"<|{cls}|>")
-
             text_mode = self._get_text_mode(cls, tv)
+            if not (
+                self.fuse_class_to_concept
+                and tv is not None
+                and text_mode == "concept"
+            ):
+                rt.append(f"<|{cls}|>")
+
             eff_seq = (
                 "fused"
                 if self.num_seq == "fused" and text_mode == "concept"
@@ -1766,7 +1884,7 @@ class DBTokenizer:
 
             if tv is not None:
                 if text_mode == "concept":
-                    concept_parts = list(self._split_concept(cls, tv))
+                    concept_parts = list(self._concept_tokens(cls, tv))
                     if eff_seq == "fused" and has_num and num_info is not None:
                         if num_info["type"] == "level":
                             idx = self._level_idx(num_info, nv)
@@ -1777,7 +1895,7 @@ class DBTokenizer:
                             ))
                             concept_parts[-1] = f"{concept_parts[-1]}::Q{bi}"
                         elif num_info["type"] == "scaling":
-                            s = self.scale(num_info, nv)
+                            s = self._scale_value(num_info, nv)
                             concept_parts[-1] = f"{concept_parts[-1]}({s:.3f})"
                     rt.extend(concept_parts)
                 else:
@@ -1795,7 +1913,7 @@ class DBTokenizer:
                     bi = int(np.digitize(nv, num_info["edges"], right=False))
                     rt.append(f"<|Q{bi}|>")
                 elif num_info["type"] == "scaling":
-                    s = self.scale(num_info, nv)
+                    s = self._scale_value(num_info, nv)
                     rt.append(f"<|NUM|>({s:.3f})")
 
             tokens_col.append(rt)
@@ -1902,6 +2020,7 @@ class DBTokenizer:
             tok for tok in self.vocab
             if tok.startswith("<|") and tok.endswith("|>")
             and not _all_special_re.match(tok)
+            and tok not in self.concept_token_meta
         }
 
         def _bin_midpoint(edges: list, bin_idx: int) -> float:
@@ -1965,6 +2084,32 @@ class DBTokenizer:
             pending_text_is_bpe = False
             pending_nv = None
             pending_scaled_val = None
+
+        def _start_row(row_cls: str) -> None:
+            nonlocal pending_cls, pending_tv_pieces, pending_text_is_bpe
+            nonlocal pending_nv, pending_scaled_val
+            _flush()
+            pending_cls = row_cls
+            pending_tv_pieces = []
+            pending_text_is_bpe = False
+            pending_nv = None
+            pending_scaled_val = None
+
+        def _apply_fused_qual(qual: str) -> None:
+            """Resolve a fused ``::LN`` / ``::QN`` suffix for the pending row."""
+            nonlocal pending_nv
+            tv_str = _pending_text_value()
+            num_info = self.numeric_params.get((pending_cls, tv_str))
+            if qual.startswith("L"):
+                level_idx = int(qual[1:])
+                if num_info is not None and "values" in num_info:
+                    lvls = num_info["values"]
+                    idx = max(0, min(level_idx, len(lvls) - 1))
+                    pending_nv = float(lvls[idx])
+            elif qual.startswith("Q"):
+                bin_idx = int(qual[1:])
+                if num_info is not None and "edges" in num_info:
+                    pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
 
         # ── Main decode loop ──────────────────────────────────────────
         for i, tok_id in enumerate(ids):
@@ -2063,14 +2208,23 @@ class DBTokenizer:
 
             # ── Class token ───────────────────────────────────────────
             if tok in _class_token_set:
-                _flush()
-                # Extract class name from <|cls|>
-                pending_cls = tok[2:-2]
-                pending_tv_pieces = []
-                pending_text_is_bpe = False
-                pending_nv = None
-                pending_scaled_val = None
+                _start_row(tok[2:-2])   # strip <| and |>
                 pending_td_key = None
+                continue
+
+            # ── Fused class+concept / namespaced concept token ────────
+            info = self._concept_piece_info(tok)
+            if info is not None:
+                info_cls, piece, fused, qual = info
+                if fused:
+                    _start_row(info_cls)
+                    pending_td_key = None
+                pending_tv_pieces.append(piece)
+                pending_text_is_bpe = False
+                if qual is not None:
+                    _apply_fused_qual(qual)
+                elif not _math.isnan(v_i):
+                    pending_scaled_val = v_i
                 continue
 
             # ── Fused concept+numeric token (tv::LN or tv::QN) ───────
@@ -2078,19 +2232,7 @@ class DBTokenizer:
                 tv_part, qual = tok.rsplit("::", 1)
                 pending_tv_pieces.append(tv_part)
                 pending_text_is_bpe = False
-                tv_str = _pending_text_value()
-                if qual.startswith("L"):
-                    level_idx = int(qual[1:])
-                    num_info = self.numeric_params.get((pending_cls, tv_str))
-                    if num_info is not None and "values" in num_info:
-                        lvls = num_info["values"]
-                        idx = max(0, min(level_idx, len(lvls) - 1))
-                        pending_nv = float(lvls[idx])
-                elif qual.startswith("Q"):
-                    bin_idx = int(qual[1:])
-                    num_info = self.numeric_params.get((pending_cls, tv_str))
-                    if num_info is not None and "edges" in num_info:
-                        pending_nv = _bin_midpoint(num_info["edges"], bin_idx)
+                _apply_fused_qual(qual)
                 continue
 
             # ── Plain concept / BPE-subword text token ────────────────
@@ -2178,6 +2320,8 @@ class DBTokenizer:
                 cls: list(spec) if not isinstance(spec, str) else spec
                 for cls, spec in self.concept_splitters.items()
             },
+            "fuse_class_to_concept": self.fuse_class_to_concept,
+            "namespace_concepts_by_class": self.namespace_concepts_by_class,
             "num_type": self.num_type,
             "num_seq": self.num_seq,
             "n_bins": self.n_bins,
@@ -2186,6 +2330,7 @@ class DBTokenizer:
             "bin_clip_max": self.bin_clip_max,
             "continuous_clip_min": self.continuous_clip_min,
             "continuous_clip_max": self.continuous_clip_max,
+            "continuous_clip_values": self.continuous_clip_values,
             "distributions": self.distributions,
             "final_vocab_size": self.final_vocab_size,
             "split_pattern": self.split_pattern,
@@ -2202,6 +2347,9 @@ class DBTokenizer:
             "numeric_params": ser_np,
             "time_delta_params": self.time_delta_params,
             "vocab": self.vocab,
+            "concept_token_meta": {
+                t: list(m) for t, m in self.concept_token_meta.items()
+            },
             "has_bpe_classes": self.has_bpe_classes,
             "dist_recommendations": self._dist_recommendations,
             "birth_dates": ser_bd,
@@ -2239,6 +2387,10 @@ class DBTokenizer:
             text_mode_overrides=tmo,
             text_mode_threshold=cfg["text_mode_threshold"],
             concept_splitters=cfg.get("concept_splitters"),
+            fuse_class_to_concept=cfg.get("fuse_class_to_concept", False),
+            namespace_concepts_by_class=cfg.get(
+                "namespace_concepts_by_class", False
+            ),
             num_type=cfg["num_type"],
             num_seq=cfg["num_seq"],
             n_bins=cfg["n_bins"],
@@ -2247,6 +2399,7 @@ class DBTokenizer:
             bin_clip_max=cfg["bin_clip_max"],
             continuous_clip_min=cfg["continuous_clip_min"],
             continuous_clip_max=cfg["continuous_clip_max"],
+            continuous_clip_values=cfg.get("continuous_clip_values", True),
             distributions=cfg.get("distributions"),
             final_vocab_size=cfg["final_vocab_size"],
             split_pattern=cfg["split_pattern"],
@@ -2284,6 +2437,10 @@ class DBTokenizer:
         tok.time_delta_params = cfg["time_delta_params"]
         tok.vocab = cfg["vocab"]
         tok.ivocab = {int(v): k for k, v in tok.vocab.items()}
+        tok.concept_token_meta = {
+            t: (m[0], m[1], bool(m[2]))
+            for t, m in cfg.get("concept_token_meta", {}).items()
+        }
         tok.has_bpe_classes = cfg["has_bpe_classes"]
         tok._dist_recommendations = cfg.get("dist_recommendations", {})
 

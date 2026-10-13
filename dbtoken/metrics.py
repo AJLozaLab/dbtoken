@@ -14,6 +14,10 @@ Key idea:
     density-adjusted bits = −log₂ p_x(x)
                           = −(log p_z(z) + log|dz/dx|) / ln(2)
   - Fused time-delta tokens get the same treatment as Q/continuous.
+  - Tails (tail_mode): by default the open-ended edge bins borrow the
+    neighbouring bin width.  With tail_mode='censored', tail events are
+    scored as probability mass in both schemes (edge-bin probability, or
+    the Gaussian tail mass beyond the clip threshold).
 
 All bits are aggregated per *data row* (one class token per row).
 
@@ -26,6 +30,7 @@ Usage::
 import math
 import re
 import numpy as np
+from scipy.special import log_ndtr
 from typing import Optional, Dict, List
 
 try:
@@ -106,6 +111,7 @@ def _per_token_bits_continuous(model, xi, xv, yi, yv):
     c_bits : Tensor[B, T]  — class cross-entropy in bits
     v_bits : Tensor[B, T]  — value Gaussian neg-log-prob in bits
         (at non-numeric positions, this is zero — NOT the phantom constant)
+    loc, scale : Tensor[B, T]  — predicted Gaussian parameters (z-space)
     """
     x_c, x_v_l, x_v_s, _, _, _ = model(xi, xv, yi, yv)
 
@@ -126,7 +132,7 @@ def _per_token_bits_continuous(model, xi, xv, yi, yv):
     is_numeric = ~torch.isnan(yv)
     v_bits = torch.where(is_numeric, v_bits_raw, torch.zeros_like(v_bits_raw))
 
-    return c_bits, v_bits
+    return c_bits, v_bits, x_v_l, x_v_s
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -137,32 +143,37 @@ def _bin_width(edges, bin_idx, ctx=None):
     """Original-scale width of quantile bin *bin_idx* given *edges*.
 
     np.digitize(x, edges, right=False) yields:
-      bin 0    : (-inf, edges[0])    -- width = edges[0] - min_threshold
-                                        (falls back to edges[0] if no ctx)
+      bin 0    : (-inf, edges[0])        -- width = edges[1] - edges[0]
       bin k    : [edges[k-1], edges[k])  -- width = edges[k] - edges[k-1]
-      bin N    : [edges[-1], +inf)   -- width = max_threshold - edges[-1]
-                                        (falls back to edges[-1] - edges[-2])
+      bin N    : [edges[-1], +inf)       -- width = edges[-1] - edges[-2]
 
-    If *ctx* is provided with 'min_threshold'/'max_threshold' keys,
-    exact tail widths are used. Otherwise sensible fallbacks apply.
-    A minimum width of 1e-12 prevents log(0).
+    The open-ended edge bins have no intrinsic width, so they borrow the
+    width of the neighbouring interior bin (the tail mass is treated as
+    spread uniformly over one neighbouring bin width).  Using the distance
+    to the clip percentile instead is near zero -- the outermost edges sit
+    at the clip percentiles -- and grossly understates tail bits.  For an
+    exact alternative, score edge bins as mass with
+    ``bits_per_row(..., tail_mode="censored")``.
+
+    *ctx* is accepted for API compatibility and is not used.  With fewer
+    than two edges there is no interior bin and the width is 1 (no
+    adjustment).  A minimum width of 1e-12 prevents log(0).
     """
     n = len(edges)
     if n <= 1:
         return 1.0
     if bin_idx <= 0:
-        if ctx is not None and "min_threshold" in ctx:
-            w = edges[0] - ctx["min_threshold"]
-        else:
-            w = edges[0]  # fallback: assumes data starts at 0
+        w = edges[1] - edges[0]
     elif bin_idx >= n:
-        if ctx is not None and "max_threshold" in ctx:
-            w = ctx["max_threshold"] - edges[-1]
-        else:
-            w = edges[-1] - edges[-2]
+        w = edges[-1] - edges[-2]
     else:
         w = edges[bin_idx] - edges[bin_idx - 1]
     return max(abs(w), 1e-12)
+
+
+def _is_edge_bin(edges, bin_idx):
+    """True when *bin_idx* is one of the two open-ended tail bins."""
+    return bin_idx <= 0 or bin_idx >= len(edges)
 
 
 def _jacobian_log_abs(params, z_value=None):
@@ -200,7 +211,32 @@ _RE_Q_IDX = re.compile(r"Q(\d+)")
 _RE_L_IDX = re.compile(r"L(\d+)")
 
 
-def _density_adjustment(tokenizer, ids, vals, types, contexts):
+def _censored_bits(tokenizer, ctx, z, loc, scale):
+    """Tail-mass bits for a continuous value at or beyond a clip threshold.
+
+    Returns −log₂ Φ((z_lo − μ)/σ) when z ≤ z_lo, −log₂ (1 − Φ((z_hi − μ)/σ))
+    when z ≥ z_hi, and ``None`` for interior values.  z_lo / z_hi are the
+    scaled clip thresholds; every scaling transform is increasing, so the
+    tail events are {x ≤ min_threshold} and {x ≥ max_threshold}.  This holds
+    whether or not encode() clamped the value.
+    """
+    lo, hi = ctx.get("min_threshold"), ctx.get("max_threshold")
+    if lo is None or hi is None or loc is None or scale is None:
+        return None
+    z_lo = tokenizer.scale(ctx, lo)
+    z_hi = tokenizer.scale(ctx, hi)
+    # Targets are stored as float32; allow for that rounding.
+    if z <= z_lo + 1e-5 * max(1.0, abs(z_lo)):
+        return -float(log_ndtr((z_lo - loc) / scale)) / LN2
+    if z >= z_hi - 1e-5 * max(1.0, abs(z_hi)):
+        return -float(log_ndtr((loc - z_hi) / scale)) / LN2
+    return None
+
+
+def _density_adjustment(
+    tokenizer, ids, vals, types, contexts,
+    tail_mode="width", v_bits=None, locs=None, scales=None,
+):
     """Compute per-position density adjustment in bits.
 
     Parameters
@@ -210,72 +246,70 @@ def _density_adjustment(tokenizer, ids, vals, types, contexts):
     vals : list[float] | None     — parallel float values (continuous mode)
     types : list[str]             — token type labels from classify_token_ids
     contexts : list[dict | None]  — numeric param dicts from get_numeric_context
+    tail_mode : str
+        ``'width'``: edge bins use the neighbouring bin width and continuous
+        values are always scored as densities.
+        ``'censored'``: tail events are scored as probability mass in both
+        schemes -- edge-bin Q tokens get no width adjustment, and continuous
+        values at/beyond a clip threshold are rescored with the predicted
+        Gaussian tail mass (requires *v_bits*, *locs*, *scales*).
+    v_bits, locs, scales : list[float] | None
+        Per-position value bits, predicted loc and scale (continuous model
+        only; used by ``tail_mode='censored'``).
 
     Returns
     -------
     adj : list[float]  — additive correction in bits per position.
         For Q tokens:     +log₂(w_k)   (converts mass → density)
         For continuous:   −log₂|dz/dx|  (Jacobian correction)
+        Censored tails:   0 for edge Q tokens; tail bits − value bits for
+                          continuous values
         For everything else: 0.0
     """
+    if tail_mode not in ("width", "censored"):
+        raise ValueError(f"tail_mode must be 'width'|'censored', got '{tail_mode}'")
+    censored = tail_mode == "censored"
     adj = [0.0] * len(ids)
 
     for i, (tid, ttype, ctx) in enumerate(zip(ids, types, contexts)):
         if ctx is None:
             continue
 
-        tok = tokenizer.decode_token(tid)
-
-        # --- Q token (factored or time-delta Q) ---
-        if ttype == "Q":
-            m = _RE_Q_IDX.search(tok)
+        # --- Binned value: factored / time-delta Q, fused time-delta Q,
+        #     fused concept+Q (hemoglobin::Q5, <|lab:hemoglobin|>::Q5) ---
+        if ttype in ("Q", "time_delta_fused", "fused_concept_Q", "class_concept_Q"):
+            tok = tokenizer.decode_token(tid)
+            # Match only the ::QN suffix — the concept piece may contain "Q<digits>"
+            m = _RE_Q_IDX.search(tok.rsplit("::", 1)[-1])
             if m and "edges" in ctx:
                 bin_idx = int(m.group(1))
+                if censored and _is_edge_bin(ctx["edges"], bin_idx):
+                    continue  # tail event scored as mass
                 w = _bin_width(ctx["edges"], bin_idx, ctx)
                 adj[i] = math.log2(w)  # mass → density: +log₂(w) in bits
             continue
 
-        # --- Fused time-delta with bin (delta_time_ip_Q3) ---
-        if ttype == "time_delta_fused":
-            m = _RE_Q_IDX.search(tok)
-            if m and "edges" in ctx:
-                bin_idx = int(m.group(1))
-                w = _bin_width(ctx["edges"], bin_idx, ctx)
-                adj[i] = math.log2(w)
+        # --- Continuous value: factored NUM marker, fused time-delta marker,
+        #     or fused concept carrying a value ---
+        is_num = ttype == "num_marker"
+        if not (is_num or ttype in ("time_delta", "concept", "class_concept")):
             continue
-
-        # --- Fused concept+Q (hemoglobin::Q5) ---
-        if ttype == "fused_concept_Q":
-            m = _RE_Q_IDX.search(tok)
-            if m and "edges" in ctx:
-                bin_idx = int(m.group(1))
-                w = _bin_width(ctx["edges"], bin_idx, ctx)
-                adj[i] = math.log2(w)
+        if ctx.get("type") != "scaling":
             continue
-
-        # --- Continuous NUM marker (factored) ---
-        if ttype == "num_marker" and ctx.get("type") == "scaling":
-            z = vals[i] if (vals is not None and not math.isnan(vals[i])) else None
-            log_jac = _jacobian_log_abs(ctx, z_value=z)
-            adj[i] = -log_jac / LN2  # −log₂|dz/dx|
+        z = vals[i] if (vals is not None and not math.isnan(vals[i])) else None
+        if z is None and not is_num:
             continue
-
-        # --- Time-delta marker carrying a continuous value (fused) ---
-        if ttype == "time_delta" and ctx is not None and ctx.get("type") == "scaling":
-            z = vals[i] if (vals is not None and not math.isnan(vals[i])) else None
-            if z is not None:
-                log_jac = _jacobian_log_abs(ctx, z_value=z)
-                adj[i] = -log_jac / LN2
-            continue
-
-        # --- Fused concept carrying a continuous value ---
-        # (concept token where vals[i] is non-NaN and context is scaling)
-        if ttype == "concept" and ctx is not None and ctx.get("type") == "scaling":
-            z = vals[i] if (vals is not None and not math.isnan(vals[i])) else None
-            if z is not None:
-                log_jac = _jacobian_log_abs(ctx, z_value=z)
-                adj[i] = -log_jac / LN2
-            continue
+        if censored and z is not None and v_bits is not None:
+            tail = _censored_bits(
+                tokenizer, ctx, z,
+                locs[i] if locs is not None else None,
+                scales[i] if scales is not None else None,
+            )
+            if tail is not None:
+                adj[i] = tail - v_bits[i]  # replace density bits with mass bits
+                continue
+        log_jac = _jacobian_log_abs(ctx, z_value=z)
+        adj[i] = -log_jac / LN2  # −log₂|dz/dx|
 
     return adj
 
@@ -301,7 +335,18 @@ _GROUP_MAP = {
     "L":                 "level",
     "fused_concept_Q":   "fused",
     "fused_concept_L":   "fused",
+    # Class folded into the first concept piece (fuse_class_to_concept):
+    # the class information rides in the text / fused groups.
+    "class_concept":     "text",
+    "class_concept_Q":   "fused",
+    "class_concept_L":   "fused",
 }
+
+# Token types that open a new row (a standalone class token, or the class
+# fused into the first concept piece).
+_ROW_START_TYPES = frozenset(
+    {"class", "class_concept", "class_concept_Q", "class_concept_L"}
+)
 
 
 def _assign_groups(types, contexts):
@@ -365,6 +410,7 @@ def bits_per_row(
     dataloader,
     model_type: str = "discrete",
     n_batches: Optional[int] = None,
+    tail_mode: str = "width",
 ) -> Dict[str, float]:
     """Compute bits-per-row metric across a dataset.
 
@@ -381,6 +427,12 @@ def bits_per_row(
         ``'discrete'`` or ``'continuous'``.
     n_batches : int | None
         Max batches to evaluate.  ``None`` = all.
+    tail_mode : str
+        ``'width'`` (default): open-ended edge bins borrow the neighbouring
+        bin width and continuous values are always scored as densities.
+        ``'censored'``: observations in the tails (edge bins, or continuous
+        values at/beyond the clip thresholds) are scored as probability
+        mass in both schemes, so both evaluate the same tail event.
 
     Returns
     -------
@@ -398,7 +450,10 @@ def bits_per_row(
         fused_bpr       — fused concept+numeric bits (density-adjusted) / n_rows
         n_rows          — total data rows (= class token count in targets)
         tokens_per_row  — average tokens per data row
+        tail_mode       — the tail convention used
     """
+    if tail_mode not in ("width", "censored"):
+        raise ValueError(f"tail_mode must be 'width'|'censored', got '{tail_mode}'")
     was_training = model.training
     model.eval()
 
@@ -418,13 +473,15 @@ def bits_per_row(
         # ── Unpack batch ──────────────────────────────────────────────
         if model_type == "continuous":
             xi, xv, yi, yv = batch
-            c_bits, v_bits = _per_token_bits_continuous(model, xi, xv, yi, yv)
+            c_bits, v_bits, v_loc, v_scale = _per_token_bits_continuous(
+                model, xi, xv, yi, yv
+            )
             # Total per-position bits = class bits + value bits
             bits = c_bits + v_bits
         else:
             xi, yi = batch[0], batch[1]
             bits = _per_token_bits_discrete(model, xi, yi)
-            yv = None
+            yv = v_bits = v_loc = v_scale = None
 
         B, T = yi.shape
 
@@ -439,7 +496,13 @@ def bits_per_row(
 
             types = tokenizer.classify_token_ids(yi_list)
             contexts = tokenizer.get_numeric_context(yi_list)
-            adj = _density_adjustment(tokenizer, yi_list, yv_list, types, contexts)
+            adj = _density_adjustment(
+                tokenizer, yi_list, yv_list, types, contexts,
+                tail_mode=tail_mode,
+                v_bits=v_bits[b].tolist() if v_bits is not None else None,
+                locs=v_loc[b].tolist() if v_loc is not None else None,
+                scales=v_scale[b].tolist() if v_scale is not None else None,
+            )
             groups = _assign_groups(types, contexts)
 
             for t in range(T):
@@ -454,7 +517,7 @@ def bits_per_row(
                 accum[g] = accum.get(g, 0.0) + adj_b
                 total_tokens += 1
 
-                if g == "class":
+                if types[t] in _ROW_START_TYPES:
                     total_rows += 1
 
     # ── Aggregate ─────────────────────────────────────────────────────
@@ -474,6 +537,7 @@ def bits_per_row(
         "fused_bpr":     accum["fused"] / n,
         "n_rows":        total_rows,
         "tokens_per_row": total_tokens / n,
+        "tail_mode":     tail_mode,
     }
 
     if was_training:
