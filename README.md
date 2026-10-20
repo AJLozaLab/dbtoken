@@ -17,6 +17,49 @@ pip install "dbtoken[metrics]"  # bits-per-row evaluation metrics (requires PyTo
 pip install "dbtoken[dev]"      # development dependencies
 ```
 
+## Runnable examples and model evaluation
+
+[demo.ipynb](demo.ipynb) includes the synthetic [data/demo.csv](data/demo.csv),
+annotated IDs and aligned numeric values, tokenizer save/load checks, and
+end-to-end fitting with discrete and continuous representations. Run it from the
+repository root after installing `python -m pip install -e ".[bpe,metrics]"`.
+The notebook contains the complete CPU models, separate discrete and continuous
+data loaders, and explicit training loops in its end-to-end sections.
+
+For discrete representations the loader yields `(Xi, Yi)` and the model returns
+`(logits, loss)`. For continuous representations it yields `(Xi, Xv, Yi, Yv)` and
+the model returns `(logits, loc, scale, loss, token_loss, value_loss)`. IDs are
+int64, floats are float32, and all input/target tensors are `[B,T]`; logits are
+`[B,T,V]`. Targets are shifted forward one token within each patient's history.
+Continuous models consume aligned values and missingness, predict a positive
+Gaussian scale, and mask NaN numeric targets. BPE and concept text share the
+same categorical interface; size the embedding using the full BPE vocabulary.
+
+The notebook calls `dbtoken.metrics.bits_per_row` on evaluation patients and
+prints its complete result, including density-adjusted `bpr`, `bpr_raw`,
+component scores, `n_rows`, `tokens_per_row`, and `tail_mode`. Compare scores on
+identical source rows, units, splits, and tail conventions. The tiny model fit
+illustrates the API and does not establish predictive performance.
+
+Files are saved separately under `artifacts/<representation>/`: `tokenizer.json`
+holds settings, vocabulary and fitted parameters; `tokenizer.bpe` holds the BPE
+encoding when applicable. Keep these together. `train.npz` and `eval.npz` hold
+int64 `ids` and, for continuous representations, aligned float32 `vals` with
+NaN for positions without a continuous payload. These are not model weights.
+The notebook verifies IDs and continuous values after loading the tokenizer.
+
+The [interactive demo repository](https://github.com/AJLozaLab/dbtoken_demo)
+also includes four complete examples with data loaders, model fitting, and BPR:
+
+- [Discrete · factored](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_discrete_factored.ipynb)
+- [Discrete · fused](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_discrete_fused.ipynb)
+- [Continuous · factored](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_continuous_factored.ipynb)
+- [Continuous · fused](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_continuous_fused.ipynb)
+
+The input field is named `class` throughout the package and examples; it
+corresponds to the earlier manuscript term `item`. Rename older inputs explicitly
+with `df.rename({"item": "class"})`.
+
 ## Input Schema
 
 Every input DataFrame must have exactly five columns:
