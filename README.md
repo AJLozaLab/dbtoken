@@ -48,14 +48,6 @@ int64 `ids` and, for continuous representations, aligned float32 `vals` with
 NaN for positions without a continuous payload. These are not model weights.
 The notebook verifies IDs and continuous values after loading the tokenizer.
 
-The [interactive demo repository](https://github.com/AJLozaLab/dbtoken_demo)
-also includes four complete examples with data loaders, model fitting, and BPR:
-
-- [Discrete · factored](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_discrete_factored.ipynb)
-- [Discrete · fused](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_discrete_fused.ipynb)
-- [Continuous · factored](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_continuous_factored.ipynb)
-- [Continuous · fused](https://github.com/AJLozaLab/dbtoken_demo/blob/main/demo_continuous_fused.ipynb)
-
 The input field is named `class` throughout the package and examples; it
 corresponds to the earlier manuscript term `item`. Rename older inputs explicitly
 with `df.rename({"item": "class"})`.
