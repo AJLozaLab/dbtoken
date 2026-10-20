@@ -133,7 +133,7 @@
     <div class="db-header">
       <div>
         <div class="db-title">DBTokenizer: Architecture & Encoding</div>
-        <div class="db-sub">Interactive visualization of how long-format records are parameterized and flattened.</div>
+        <div class="db-sub">Illustrated synthetic records and token streams. Values, bins, and BPE pieces are schematic; run the notebook for fitted outputs.</div>
       </div>
       <div class="radio-group">
         <label class="radio-lbl">
@@ -150,7 +150,7 @@
     <div class="table-wrap">
       <table class="src-table">
         <thead>
-          <tr><th>id</th><th>time</th><th>class</th><th>text_value</th><th>num_val</th></tr>
+          <tr><th>id</th><th>time</th><th>class</th><th>text_value</th><th>numeric_value</th></tr>
         </thead>
         <tbody>
           <tr><td>1</td><td>2024-01-02 08:00:00</td><td>lab</td><td>hemoglobin</td><td>13.2</td></tr>
@@ -159,6 +159,13 @@
         </tbody>
       </table>
     </div>
+
+    <p class="db-sub">The schema uses <code>class</code> (called <code>item</code> in earlier manuscript wording).
+      Each token ID belongs to its trained vocabulary; stream positions are not IDs.
+      Continuous floats align with token positions; positions without floats have NaN in the encoded array.</p>
+    <p class="db-sub">For complete discrete and continuous data loaders, model definitions, training loops,
+      saved artifacts, and BPR evaluation, open <a href="demo.ipynb">demo.ipynb</a>.
+      Discrete batches contain <code>(Xi, Yi)</code>; continuous batches contain <code>(Xi, Xv, Yi, Yv)</code>.</p>
 
     <!-- 2. Training Artifacts -->
     <div class="sec-title">2. Training & Core Concepts</div>
@@ -180,7 +187,7 @@
     <div class="table-wrap scrollable" id="full-table-wrap">
       <table class="src-table">
         <thead>
-          <tr><th style="width:40px">Row</th><th>id</th><th>time</th><th>class</th><th>text_value</th><th>num_val</th></tr>
+          <tr><th style="width:40px">Row</th><th>id</th><th>time</th><th>class</th><th>text_value</th><th>numeric_value</th></tr>
         </thead>
         <tbody id="sync-tbody">
           <tr id="row-0"><td><div class="row-badge">0</div></td><td>1</td><td>1958-03-15 00:00:00</td><td>demographic</td><td>birth_date</td><td></td></tr>
@@ -235,9 +242,14 @@
 
 <script>
 const getCodeSnippet = (mode) => `
+from dbtoken import DBTokenizer
+import polars as pl
+
+df = pl.read_csv("data/demo.csv", try_parse_dates=True, null_values=[""])
 <span class="kw">tok</span> = DBTokenizer(
   text_mode_default=<span class="str">"auto"</span>,
   text_mode_overrides={
+    <span class="str">"medication"</span>: <span class="str">"bpe"</span>,
     <span class="str">"lab"</span>: <span class="str">"concept"</span>,
     <span class="str">"vital"</span>: <span class="str">"concept"</span>,
     <span class="str">"flowsheet"</span>: <span class="str">"concept"</span>,
@@ -245,10 +257,13 @@ const getCodeSnippet = (mode) => `
   num_type=<span class="str">"${mode}"</span>,
   num_seq=<span class="str">"fused"</span>,
   n_bins=5,
-  milestone_ip=<span class="str">"8hr"</span>,
-  milestone_op=<span class="str">"week"</span>,
+  time_scales=[86400.0],
+  time_scale_names=[<span class="str">"short"</span>, <span class="str">"long"</span>],
+  state_transitions={<span class="str">"inpatient"</span>: [<span class="str">"admission"</span>], <span class="str">"default"</span>: [<span class="str">"discharge"</span>]},
+  milestone_per_state={<span class="str">"inpatient"</span>: <span class="str">"8hr"</span>, <span class="str">"default"</span>: <span class="str">"week"</span>},
 )
-tok.train(df)`.trim();
+tok.train(df)
+ids, vals = tok.encode(df)`.trim();
 
 const TRAIN_DATA = {
   continuous: [
@@ -256,12 +271,12 @@ const TRAIN_DATA = {
       blocks: [
         { term: "BPE vs. Concept", text: "<code>BPE</code> breaks unknown text into subwords. <code>Concept</code> creates one exact token ID for the whole string. <code>lab</code> and <code>vital</code> are overridden to Concept mode here." },
         { term: "Factored vs. Fused", text: "<b>Factored</b> mode emits numerics as a separate following token (e.g. <code>&lt;|NUM|&gt;</code>). <b>Fused</b> mode embeds the value into the text token (e.g. <code>heart_rate</code> carries the payload natively)." },
-        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), a single value cannot be mathematically split across subwords, forcing a silent fallback to Factored placement." }
+        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), numeric payloads use a separate following token (Factored placement)." }
       ]
     },
     { title: "Temporal & State Tracking", 
       blocks: [
-        { term: "Time Deltas (IP vs OP)", text: "Deltas measure time elapsed between rows. The engine trains different scaler curves for Inpatient events (e.g., rapid ICU checks) vs Outpatient events (e.g., clinic visits)." },
+        { term: "Time-Delta Bands", text: "Deltas measure time elapsed between rows. The engine fits separate transforms for configured duration bands: short gaps below 24 hours and long gaps of 24 hours or more. State transitions separately select milestone schedules." },
         { term: "Grid Milestones", text: "To avoid modeling absolute timestamps, the engine relies on predictable grid anchors (e.g., <code>&lt;|ms_week_1|&gt;</code>)." },
         { term: "The Emission Rule", text: "A milestone is only emitted if the time delta crosses a boundary. If a gap crosses <i>multiple</i> boundaries, only the <b>last</b> boundary is emitted (State Tracking)." }
       ]
@@ -272,12 +287,12 @@ const TRAIN_DATA = {
       blocks: [
         { term: "BPE vs. Concept", text: "<code>BPE</code> breaks unknown text into subwords. <code>Concept</code> creates one exact token ID for the whole string. <code>lab</code> and <code>vital</code> are overridden to Concept mode here." },
         { term: "Factored vs. Fused", text: "<b>Factored</b> mode emits numerics as a separate following token (e.g. <code>&lt;|Q1|&gt;</code>). <b>Fused</b> mode embeds the bin string directly into the text token (e.g. <code>heart_rate::Q2</code>)." },
-        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), a single quantile bin cannot be attached to multiple subwords, forcing a silent fallback to Factored placement." }
+        { term: "The Fusion Rule", text: "Fused placement <i>requires</i> Concept mode. If text defaults to BPE (like <code>medication</code>), numeric bins use a separate following token (Factored placement)." }
       ]
     },
     { title: "Temporal & State Tracking", 
       blocks: [
-        { term: "Time Deltas (IP vs OP)", text: "Deltas measure time elapsed between rows. The engine trains different N-Quantile bins for Inpatient events (e.g., < 1 hour) vs Outpatient events (e.g., > 1 week)." },
+        { term: "Time-Delta Bands", text: "Deltas measure time elapsed between rows. The engine learns separate quantile bins for configured duration bands: short gaps below 24 hours and long gaps of 24 hours or more. State transitions separately select milestone schedules." },
         { term: "Grid Milestones", text: "To avoid modeling absolute timestamps, the engine relies on predictable grid anchors (e.g., <code>&lt;|ms_week_1|&gt;</code>)." },
         { term: "The Emission Rule", text: "A milestone is only emitted if the time delta crosses a boundary. If a gap crosses <i>multiple</i> boundaries, only the <b>last</b> boundary is emitted (State Tracking)." }
       ]
@@ -294,7 +309,7 @@ const TT = {
   l_fuse: "Fused Concept (Level):Distinct values fall below threshold, mapping to exact discrete 'Levels'.",
   c_fuse: "Fused Concept (Continuous):Text token natively carries the centered/scaled continuous float.",
   q_fuse: "Fused Concept (Bin):Continuous values parameterized into discrete Quantile bins.",
-  dt_c: "Time Delta (Continuous):Gap between rows, expressed as a Gamma-scaled continuous float.",
+  dt_c: "Time Delta (Continuous):Gap between rows, transformed using its fitted distribution.",
   dt_q: "Time Delta (Bin):Gap between rows, sorted into a discrete Quantile bin.",
   ms: "State Tracker (Milestone):Indicates the time gap just crossed a logical grid boundary.",
   bpe: "BPE Subword:High-cardinality text broken into smaller learned chunks.",
@@ -313,7 +328,7 @@ const STREAM_SEQ = {
     { r: 2, tok: "glucose::L2", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 3, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 3, tok: "creatinine::L1", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 4, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 4, tok: "<|delta_time_short|>", type: "t-time", val: -0.527, desc: TT.dt_c },
     { r: 4, tok: "<|ms_week_1|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 4, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 4, tok: "heart_rate", type: "t-concept", val: -0.557, desc: TT.c_fuse },
@@ -323,7 +338,7 @@ const STREAM_SEQ = {
     { r: 6, tok: "blood_pressure_diastolic::L3", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 7, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 7, tok: "spo2::L5", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 8, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 8, tok: "<|delta_time_short|>", type: "t-time", val: -0.527, desc: TT.dt_c },
     { r: 8, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 8, tok: "lisinopril", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
@@ -342,14 +357,14 @@ const STREAM_SEQ = {
     { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 9, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 9, tok: "<|NUM|>", type: "t-num", val: 1.250, desc: TT.f_num },
-    { r: 10, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 10, tok: "<|delta_time_short|>", type: "t-time", val: -0.527, desc: TT.dt_c },
     { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
     { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
     { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
-    { r: 13, tok: "<|delta_time_op|>", type: "t-time", val: 1.572, desc: TT.dt_c },
+    { r: 13, tok: "<|delta_time_long|>", type: "t-time", val: 1.572, desc: TT.dt_c },
     { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 13, tok: "hemoglobin::L5", type: "t-concept", val: null, desc: TT.l_fuse },
@@ -357,7 +372,7 @@ const STREAM_SEQ = {
     { r: 14, tok: "glucose::L3", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 15, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 15, tok: "creatinine::L2", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 16, tok: "<|delta_time_op|>", type: "t-time", val: -0.527, desc: TT.dt_c },
+    { r: 16, tok: "<|delta_time_short|>", type: "t-time", val: -0.527, desc: TT.dt_c },
     { r: 16, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 16, tok: "heart_rate", type: "t-concept", val: -0.132, desc: TT.c_fuse },
     { r: 17, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
@@ -376,7 +391,7 @@ const STREAM_SEQ = {
     { r: 2, tok: "glucose::L2", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 3, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 3, tok: "creatinine::L1", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 4, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 4, tok: "<|delta_time_short_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 4, tok: "<|ms_week_1|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 4, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 4, tok: "heart_rate::Q2", type: "t-concept", val: null, desc: TT.q_fuse },
@@ -386,7 +401,7 @@ const STREAM_SEQ = {
     { r: 6, tok: "blood_pressure_diastolic::L3", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 7, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 7, tok: "spo2::L5", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 8, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 8, tok: "<|delta_time_short_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 8, tok: "<|medication|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 8, tok: "lisinopril", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 8, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
@@ -405,14 +420,14 @@ const STREAM_SEQ = {
     { r: 9, tok: ",", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 9, tok: " mg", type: "t-bpe", val: null, desc: TT.bpe },
     { r: 9, tok: "<|Q3|>", type: "t-num", val: null, desc: TT.f_bin },
-    { r: 10, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 10, tok: "<|delta_time_short_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 10, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 10, tok: "o2_device: room_air", type: "t-concept", val: null, desc: TT.c_none },
     { r: 11, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 11, tok: "diet: regular", type: "t-concept", val: null, desc: TT.c_none },
     { r: 12, tok: "<|flowsheet|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 12, tok: "fall_risk: low", type: "t-concept", val: null, desc: TT.c_none },
-    { r: 13, tok: "<|delta_time_op_Q5|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 13, tok: "<|delta_time_long_Q5|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 13, tok: "<|ms_week_3|>", type: "t-demo", val: null, desc: TT.ms },
     { r: 13, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 13, tok: "hemoglobin::L5", type: "t-concept", val: null, desc: TT.l_fuse },
@@ -420,7 +435,7 @@ const STREAM_SEQ = {
     { r: 14, tok: "glucose::L3", type: "t-concept", val: null, desc: TT.l_fuse },
     { r: 15, tok: "<|lab|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 15, tok: "creatinine::L2", type: "t-concept", val: null, desc: TT.l_fuse },
-    { r: 16, tok: "<|delta_time_op_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
+    { r: 16, tok: "<|delta_time_short_Q1|>", type: "t-time", val: null, desc: TT.dt_q },
     { r: 16, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
     { r: 16, tok: "heart_rate::Q3", type: "t-concept", val: null, desc: TT.q_fuse },
     { r: 17, tok: "<|vital|>", type: "t-cls", val: null, desc: TT.cls },
